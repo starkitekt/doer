@@ -676,3 +676,210 @@ test('the header says where the subagents went', async ($, on) => {
   await spawnOf($, 'look again', 'Explore')
   expect((await draw()).all).toContain('Haiku 2')
 })
+
+// ---- Per subagent: its end is matched to its spawn, and the router learns from each one -------------
+
+const endOf = (agentId: string, extra: object = {}) => ({ ...END, agentId, ...extra }) as any
+const bit = (tier: string, outcome: string, kind = 'general-purpose') => ({ tier, kind, outcome, description: 'x', model: 'm', why: 'rule' })
+const prompt = (i: number, spawns: object[], extra: object = {}) => ({ id: 'p' + i, tier: 'high', outcome: 'ok', spawns, text: '', ...extra })
+
+test("a subagent's end lands on its own spawn, with its kind, outcome and time", async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore')
+  await spawnOf($, 'sketch it', 'Plan')
+  await $.turn.complete(endOf('a2', { durationMs: 7000 }))
+  await clock.settle()
+  const [first, second] = (w.store.prompts as any[])[0].spawns
+  expect(first).toMatchObject({ agentId: 'a1', kind: 'Explore', outcome: 'running' })
+  expect(second).toMatchObject({ agentId: 'a2', kind: 'Plan', outcome: 'ok', ms: 7000 })
+})
+
+test('an empty answer, an error and a refusal count as failed; an abort is its own outcome', { options: { retry: false } }, async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  for (const d of ['one', 'two', 'three', 'four', 'five']) await spawnOf($, d)
+  await $.turn.complete(endOf('a1', { answer: '  ' }))
+  await $.turn.complete(endOf('a2', { reason: 'error' }))
+  await $.turn.complete(endOf('a3', { reason: 'refusal', refusal: {} }))
+  await $.turn.complete(endOf('a4', { reason: 'aborted', isAborted: true }))
+  await $.turn.complete(endOf('a5'))
+  await clock.settle()
+  expect((w.store.prompts as any[])[0].spawns.map((s: any) => s.outcome)).toEqual(['empty', 'error', 'refused', 'aborted', 'ok'])
+})
+
+test('an end that arrives before the spawn call returns is kept and matched', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await $.turn.complete(endOf('a1', { durationMs: 900 }))
+  await spawnOf($, 'quick one')
+  await clock.settle()
+  expect((w.store.prompts as any[])[0].spawns[0]).toMatchObject({ agentId: 'a1', outcome: 'ok', ms: 900 })
+})
+
+test('an end that arrives after the prompt is over still reaches the log', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'background work')
+  await $.turn.complete(END)
+  await clock.settle()
+  expect((w.store.prompts as any[])[0]).toMatchObject({ outcome: 'ok' })
+  await $.turn.complete(endOf('a1', { reason: 'error' }))
+  await clock.settle()
+  expect((w.store.prompts as any[])[0].spawns[0]).toMatchObject({ agentId: 'a1', outcome: 'error' })
+})
+
+test("a failing low tier is judged on its own spawns, not charged to the prompt's highest tier", async ($, on) => {
+  // Every prompt ended well at the high tier, but the mid-tier helpers inside them kept failing.
+  const log = Array.from({ length: 4 }, (_, i) => prompt(i, [bit('mid', 'error'), bit('high', 'ok')]))
+  const w = orchestra($, on, { store: { prompts: log }, labels: 'medium' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'make it nicer')
+  expect(w.seen[0].model).toBe('opus')
+})
+
+test('the router learns by kind of work when that kind has enough samples', async ($, on) => {
+  const log = [
+    ...Array.from({ length: 3 }, (_, i) => prompt(i, [bit('mid', 'error', 'Foo')])),
+    ...Array.from({ length: 8 }, (_, i) => prompt(10 + i, [bit('mid', 'ok', 'Bar')])),
+  ]
+  const w = orchestra($, on, { store: { prompts: log }, labels: 'medium' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'make it nicer', 'Foo')
+  await spawnOf($, 'make it nicer', 'Baz')
+  expect(w.seen[0].model).toBe('opus')
+  expect(w.seen[1].model).not.toBe('opus')
+})
+
+test("a user's abort is not a miss, and a mostly good tier stays where it is", async ($, on) => {
+  const aborted = Array.from({ length: 5 }, (_, i) => prompt(i, [bit('mid', 'aborted')]))
+  const mixed = Array.from({ length: 4 }, (_, i) => prompt(20 + i, [bit('mid', i === 0 ? 'error' : 'ok')]))
+  const w = orchestra($, on, { store: { prompts: [...aborted, ...mixed] }, labels: 'medium' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'make it nicer')
+  expect(w.seen[0].model).not.toBe('opus')
+})
+
+// ---- Rerun on failure, overrides and /routing ------------------------------------------------
+
+// A helper the router placed on the low tier fails; the rerun's end is driven while the first end still waits.
+async function failThenRerun($: $T, first: object, second: object = {}) {
+  const a = $.turn.complete(endOf('a1', first))
+  await $.turn.complete(endOf('a2', second))
+  return (await a) as any
+}
+
+test('a failed low-tier helper is run once more, one tier up, with the diagnosis', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore')
+  const r = await failThenRerun($, { answer: '' }, { answer: 'found it' })
+  await clock.settle()
+  expect(w.seen).toHaveLength(2)
+  expect(w.seen[1]).toMatchObject({ model: 'sonnet', description: 'Retry: look around', subagent_type: 'Explore' })
+  expect(w.seen[1].prompt).toContain('an empty answer')
+  expect(r).toBeDefined()
+  const spawns = (w.store.prompts as any[])[0].spawns
+  expect(spawns.map((s: any) => s.why)).toEqual(['rule', 'retry'])
+  expect(spawns[0].outcome).toBe('empty')
+  expect(spawns[1]).toMatchObject({ tier: 'mid', outcome: 'ok' })
+})
+
+test('a rerun that fails too leaves the first answer, and is not run again', async ($, on) => {
+  on('turn.complete', () => ({ text: 'first' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore')
+  const r = await failThenRerun($, { reason: 'error' }, { reason: 'error' })
+  await clock.settle()
+  expect(w.seen).toHaveLength(2)
+  expect(r.text).toBe('first')
+})
+
+test('no rerun for an abort, a model the caller named, a fork, the top tier, or a good answer', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore') // a1: aborted
+  await spawnOf($, 'look again', 'Explore', { model: 'haiku' }) // a2: named by the caller
+  await spawnOf($, 'branch off', 'fork') // a3
+  await spawnOf($, 'audit it', 'security-review') // a4: high tier
+  await spawnOf($, 'scan it', 'Explore') // a5: ok
+  await $.turn.complete(endOf('a1', { reason: 'aborted', isAborted: true }))
+  await $.turn.complete(endOf('a2', { answer: '' }))
+  await $.turn.complete(endOf('a3', { answer: '' }))
+  await $.turn.complete(endOf('a4', { answer: '' }))
+  await $.turn.complete(endOf('a5'))
+  await clock.settle()
+  expect(w.seen).toHaveLength(5)
+})
+
+test('reruns stop at three a prompt, and a new prompt starts the count again', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  for (let i = 0; i < 4; i++) {
+    await spawnOf($, 'look ' + i, 'Explore')
+    const id = 'a' + w.seen.length
+    const a = $.turn.complete(endOf(id, { answer: '' }))
+    if (i < 3) await $.turn.complete(endOf('a' + (w.seen.length), { answer: 'fine' }))
+    await a
+  }
+  await clock.settle()
+  expect(w.seen.filter(s => String(s.description).startsWith('Retry: '))).toHaveLength(3)
+})
+
+test('retry off in the settings means no rerun', { options: { retry: false } }, async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore')
+  await $.turn.complete(endOf('a1', { answer: '' }))
+  await clock.settle()
+  expect(w.seen).toHaveLength(1)
+})
+
+test('a pinned word sets the tier, high over low, before the rules and the learning', { options: { alwaysHigh: 'audit', alwaysLow: 'search, audit' } }, async ($, on) => {
+  const log = Array.from({ length: 4 }, (_, i) => prompt(i, [bit('high', 'error')]))
+  const w = orchestra($, on, { store: { prompts: log }, labels: 'hard' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'audit the search code', 'Explore')
+  await spawnOf($, 'search the repo', 'Plan')
+  expect(w.seen[0].model).toBe('opus')
+  expect(w.seen[1].model).toBe('haiku')
+})
+
+test('/routing reports each tier, each kind, the reruns and the pins', { options: { alwaysLow: 'search' } }, async ($, on) => {
+  const log = [prompt(1, [bit('low', 'ok', 'Explore'), bit('low', 'error', 'Explore'), bit('mid', 'ok')])]
+  const w = orchestra($, on, { store: { prompts: log } })
+  await boot($, on, { seen: w.seen })
+  const r = (await $.command.run({ command: 'routing' } as any)) as any
+  expect(r.text).toContain('Haiku (low)')
+  expect(r.text).toContain('1/2 ok')
+  expect(r.text).toContain('Sonnet (mid)')
+  expect(r.text).toContain('Explore · low')
+  expect(r.text).toContain('Reruns: on')
+  expect(r.text).toContain('Pinned: low: search')
+})
+
+test('/routing says so when nothing has been scored', async ($, on) => {
+  const w = orchestra($, on)
+  await boot($, on, { seen: w.seen })
+  const r = (await $.command.run({ command: 'routing' } as any)) as any
+  expect(r.text).toContain('No helpers scored yet.')
+  expect(r.text).toContain('Pinned: none')
+})

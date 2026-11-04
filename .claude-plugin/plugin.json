@@ -1,1 +1,39 @@
-{ "name": "live-checklist", "version": "0.6.0", "description": "A problem-and-fix explainer above the prompt that Claude keeps up to date", "author": { "name": "starkitekt", "url": "https://github.com/starkitekt" }, "homepage": "https://github.com/starkitekt/doer", "license": "MIT", "types": "./types/index.d.ts" }
+{
+  "name": "live-checklist",
+  "version": "0.7.0",
+  "description": "A problem-and-fix explainer above the prompt that Claude keeps up to date",
+  "author": { "name": "starkitekt", "url": "https://github.com/starkitekt" },
+  "homepage": "https://github.com/starkitekt/doer",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "retry": {
+      "type": "boolean",
+      "title": "Run failed helpers again one tier up",
+      "description": "When a helper the router placed fails (error, refusal or empty answer), run it once more on the next tier up. Up to 3 a prompt.",
+      "default": true,
+      "required": false
+    },
+    "alwaysLow": {
+      "type": "string",
+      "title": "Always use the low tier for",
+      "description": "Comma-separated words. A helper whose agent type or description contains one runs on the low tier (Haiku).",
+      "default": "",
+      "required": false
+    },
+    "alwaysMid": {
+      "type": "string",
+      "title": "Always use the mid tier for",
+      "description": "Comma-separated words. A helper whose agent type or description contains one runs on the mid tier (Sonnet).",
+      "default": "",
+      "required": false
+    },
+    "alwaysHigh": {
+      "type": "string",
+      "title": "Always use the high tier for",
+      "description": "Comma-separated words. A helper whose agent type or description contains one runs on the high tier (Opus). Beats the other two.",
+      "default": "",
+      "required": false
+    }
+  }
+}

@@ -53,16 +53,32 @@ The mod adds this to Claude's system prompt whenever it can draw the band, and t
 Subagents are placed on a tier instead of all running on one model. Tiers are relative: **low** (Haiku), **mid** (Sonnet), **high** (Opus or Fable), set by alias so they follow the latest model of each kind. For each spawn, in order:
 
 1. A model the caller named is kept.
-2. **Rules:** by agent type (`Explore` low; `Plan`, `code-review`, `security-review` high), then by the description's wording (*find, list, read, rename* low; *plan, review, audit, debug, refactor, security* high).
-3. **Judgement:** otherwise the small model rates the task easy, medium or hard (8 s limit).
-4. If that fails, the prompt's own tier, else mid.
-5. **Learning:** if the last 8 finished prompts at a tier mostly failed (at least 3, half or more), the tier moves up one.
+2. **Your pins** (see Settings): a helper whose agent type or description contains a pinned word goes to that tier, final, with no rules, judgement or learning after it. High beats mid beats low.
+3. **Rules:** by agent type (`Explore` low; `Plan`, `code-review`, `security-review` high), then by the description's wording (*find, list, read, rename* low; *plan, review, audit, debug, refactor, security* high).
+4. **Judgement:** otherwise the small model rates the task easy, medium or hard (8 s limit).
+5. If that fails, the prompt's own tier, else mid.
+6. **Learning:** each subagent is scored on its own when it ends: *failed* is an error, a refusal or an empty answer (a user's abort counts for nothing). If the last 8 scored subagents at a tier, of the same kind of work once that kind has 3, mostly failed (half or more), the tier moves up one. Prompts logged before subagents were scored fall back to how the whole prompt ended.
 
 A tier equal to the parent's is left as inherit. The header shows where this prompt's subagents went, `Haiku 2 · Opus 1`. A failure in any step lets the spawn run as asked.
 
+**Rerun on failure.** When a helper the router placed ends *failed* (error, refusal, empty answer), it is run once more one tier up, told what went wrong, with `Retry: ` ahead of its description. Not for aborts, helpers whose model the caller named, forks, teammates, the top tier or a rerun itself; at most 3 a prompt. A rerun that works is handed back as the helper's text, which the engine shows beneath the first answer; whether the parent reads it in place of the first is not confirmed. Logged with reason `retry`.
+
+## /routing
+
+Type `/routing` for how each tier and kind of helper has done (last 8 scored: ok count, tokens, total), whether reruns are on, and your pins.
+
+## Settings
+
+Under the plugin's config rows (per project when set in project-scope `pluginConfigs`):
+
+| Field | Does |
+|---|---|
+| `retry` | rerun failed helpers one tier up (default on) |
+| `alwaysLow`, `alwaysMid`, `alwaysHigh` | comma-separated words; a helper whose agent type or description contains one is pinned to that tier |
+
 ## Prompt log
 
-Every prompt is logged across sessions in the mod's store under `prompts` (latest 200): the prompt (160 characters), `where` it ran (`repo` or `local`), its tier, the subagents placed with the reason for each, the tokens and milliseconds it took, and how it ended (`ok`, `aborted`, `error`, `refused`). It is stored on your machine only. Delete the `prompts` key to clear it.
+Every prompt is logged across sessions in the mod's store under `prompts` (latest 200): the prompt (160 characters), `where` it ran (`repo` or `local`), its tier, the subagents placed with the reason for each and, once they end, their kind, outcome, tokens and time, the tokens and milliseconds it took, and how it ended (`ok`, `aborted`, `error`, `refused`). It is stored on your machine only. Delete the `prompts` key to clear it.
 
 ## Install
 

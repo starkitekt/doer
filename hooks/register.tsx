@@ -277,6 +277,7 @@ async function applyList($: EngineInterface, rawTitle: unknown, raw: unknown[], 
 // Tiers are relative (low < mid < high); an alias keeps them on the latest model of each kind.
 const TIERS: Tier[] = ['low', 'mid', 'high']
 const ALIAS: Record<Tier, string> = { low: 'haiku', mid: 'sonnet', high: 'opus' }
+const LABEL_OF: Record<Tier, string> = { low: 'Haiku', mid: 'Sonnet', high: 'Opus' }
 const tierOf = (model: string): Tier => {
   const k = /opus|fable/i.test(model) ? 'high' : /haiku/i.test(model) ? 'low' : 'mid'
   return k
@@ -301,6 +302,19 @@ const LOG_KEY = 'prompts'
 const LOG_MAX = 200
 const LEARN_WINDOW = 8
 const LEARN_MIN = 3
+const RETRY_PREFIX = 'Retry: '
+const RETRY_MAX = 3 // reruns per prompt
+const RETRY_WAIT_MS = 180000
+
+// Your settings (the manifest's userConfig): whether failed helpers are rerun, and words that pin a tier.
+// A word matches the agent type or the description, case-insensitively; high beats mid beats low.
+type Config = { retry: boolean; pins: Record<Tier, string[]> }
+const words = (v: unknown) => String(v ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+let cfg: Config = { retry: true, pins: { low: [], mid: [], high: [] } }
+const readConfig = (o: Readonly<Record<string, unknown>> | undefined): Config => ({
+  retry: o?.retry !== false,
+  pins: { low: words(o?.alwaysLow), mid: words(o?.alwaysMid), high: words(o?.alwaysHigh) },
+})
 
 const isEntry = (v: unknown): v is Entry => typeof v === 'object' && v !== null && typeof (v as Entry).id === 'string' && typeof (v as Entry).outcome === 'string'
 
@@ -328,12 +342,123 @@ function persist($: EngineInterface, entry: Entry) {
     .catch(() => undefined)
 }
 
-// Learning: a tier whose last few finished prompts mostly failed is moved up one for the next subagents.
-function escalate(tier: Tier, log: Entry[]): Tier {
-  const seen = log.filter(x => x.tier === tier && x.outcome !== 'running').slice(-LEARN_WINDOW)
-  const bad = seen.filter(x => x.outcome !== 'ok').length
+// Learning: a tier whose last few subagents mostly failed is moved up one for the next ones. Each subagent is
+// scored on its own (failed: error, refusal, or an empty answer; a user's abort says nothing about the model),
+// by kind of work when that kind has enough samples, else across the tier. Prompts logged before subagents
+// were scored are the fallback, judged by how the whole prompt ended.
+const failed = (o: Spawn['outcome']) => o === 'error' || o === 'refused' || o === 'empty'
+const rate = (xs: boolean[]) => xs.slice(-LEARN_WINDOW)
+function escalate(tier: Tier, kind: string, log: Entry[]): Tier {
   const up = TIERS[TIERS.indexOf(tier) + 1]
-  return seen.length >= LEARN_MIN && bad / seen.length >= 0.5 && up ? up : tier
+  if (!up) return tier
+  const scored = log
+    .flatMap(x => (Array.isArray(x.spawns) ? x.spawns : []))
+    .filter(s => s.tier === tier && s.outcome && s.outcome !== 'running' && s.outcome !== 'aborted')
+  const ofKind = scored.filter(s => s.kind === kind)
+  let seen = rate((ofKind.length >= LEARN_MIN ? ofKind : scored).map(s => failed(s.outcome)))
+  if (seen.length < LEARN_MIN)
+    seen = rate(log.filter(x => x.tier === tier && x.outcome !== 'running' && (x.spawns ?? []).every(s => !s.outcome)).map(x => x.outcome !== 'ok'))
+  return seen.length >= LEARN_MIN && seen.filter(Boolean).length / seen.length >= 0.5 ? up : tier
+}
+
+// ---- Per subagent: its end is matched to its spawn by agent id. ----
+// An agent's tokens add up as its responses arrive; its end (which can come before the spawn call returns,
+// or after the prompt is over) is kept until it is matched.
+const agentTok = new Map<string, number>()
+const ended = new Map<string, Partial<Spawn>>()
+const trimMap = <K, V>(m: Map<K, V>) => {
+  if (m.size > 100) m.delete(m.keys().next().value as K)
+}
+
+// Patch the spawn that holds this agent id: in the running prompt, else in the log.
+async function settle($: EngineInterface, agentId: string, patch: Partial<Spawn>) {
+  const cur = await read($, run)
+  if (cur?.spawns.some(s => s.agentId === agentId)) {
+    const next = { ...cur, spawns: cur.spawns.map(s => (s.agentId === agentId ? { ...s, ...patch } : s)) }
+    await update($, run, () => next)
+    persist($, next)
+    return
+  }
+  logChain = logChain
+    .then(async () => {
+      const log = await readLog($)
+      const at = log.findIndex(x => Array.isArray(x.spawns) && x.spawns.some(s => s.agentId === agentId))
+      if (at < 0) return
+      log[at] = { ...log[at], spawns: log[at].spawns.map(s => (s.agentId === agentId ? { ...s, ...patch } : s)) }
+      await $.store.set(LOG_KEY, log.slice(-LOG_MAX))
+    })
+    .catch(() => undefined)
+}
+
+// The spawn call returned an id: give it to the first spawn of that description that has none yet, and apply
+// the agent's end if it already came.
+async function attach($: EngineInterface, description: string, agentId: string) {
+  const cur = await read($, run)
+  if (!cur) return
+  const at = cur.spawns.findIndex(s => s.description === description && !s.agentId)
+  if (at < 0) return
+  const early = ended.get(agentId)
+  ended.delete(agentId)
+  const next = { ...cur, spawns: cur.spawns.map((s, i) => (i === at ? { ...s, agentId, outcome: 'running' as const, ...early } : s)) }
+  await update($, run, () => next)
+  persist($, next)
+}
+
+const outcomeOf = (e: { reason: string; answer: string }): NonNullable<Spawn['outcome']> =>
+  e.reason === 'answer' ? (e.answer.trim() ? 'ok' : 'empty') : e.reason === 'aborted' ? 'aborted' : e.reason === 'refusal' ? 'refused' : 'error'
+
+// ---- Rerun: a helper on a lower tier that failed is run once more, one tier up, with a diagnosis. ----
+// What each live helper was asked, kept until it ends; its end (the engine gives a subagent's answer only on
+// its own turn.complete) is kept so a rerun that finishes early is still found.
+type Asked = { prompt: string; description: string; kind: string; tier: Tier; why: Spawn['why'] }
+const asked = new Map<string, Asked>()
+const answers = new Map<string, { reason: string; answer: string }>()
+const waiting = new Map<string, () => void>()
+let retries = 0
+
+function waitFor($: EngineInterface, id: string) {
+  const have = answers.get(id)
+  if (have) return Promise.resolve(have)
+  return Promise.race([new Promise<void>(res => waiting.set(id, res)).then(() => answers.get(id)), $.clock.sleep(RETRY_WAIT_MS).then(() => undefined)]).finally(() => waiting.delete(id))
+}
+
+// Returns the rerun's answer when there was one and it worked; else undefined, and the first answer stands.
+// Only for helpers the router placed (not ones the caller named a model for, forks, aborts, reruns, or the top tier),
+// at most RETRY_MAX a prompt.
+async function retry($: EngineInterface, agentId: string, e: { reason: string; answer: string }): Promise<string | undefined> {
+  const was = asked.get(agentId)
+  asked.delete(agentId)
+  if (!was || !cfg.retry || retries >= RETRY_MAX) return
+  if (was.why === 'given' || was.why === 'retry' || was.kind === 'fork' || was.kind === 'teammate') return
+  const outcome = outcomeOf(e)
+  if (!failed(outcome)) return
+  const up = TIERS[TIERS.indexOf(was.tier) + 1]
+  if (!up) return
+  retries++
+  const cause = outcome === 'empty' ? 'an empty answer' : outcome === 'refused' ? 'a refusal' : 'an error'
+  const started = await $.agent.spawn({
+    prompt: `A smaller model tried this and ended with ${cause}. Do the whole task again and answer in full.\n\n${was.prompt}`,
+    description: RETRY_PREFIX + was.description,
+    subagentType: was.kind,
+    model: ALIAS[up],
+  })
+  if (started.deny || !started.agentId) return
+  const got = await waitFor($, started.agentId)
+  answers.delete(started.agentId)
+  return got && !failed(outcomeOf(got)) ? got.answer : undefined
+}
+
+// A subagent's turn ended: how, how long, and what it cost.
+async function agentEnded($: EngineInterface, agentId: string, e: { reason: string; answer: string; durationMs: number }) {
+  const outcome = outcomeOf(e)
+  const patch: Partial<Spawn> = { outcome, ms: Math.max(0, e.durationMs), tokens: agentTok.get(agentId) ?? 0 }
+  agentTok.delete(agentId)
+  const known = ((await read($, run))?.spawns ?? []).some(s => s.agentId === agentId)
+  if (known) return settle($, agentId, patch)
+  // Not in the running prompt: either its spawn call has not returned yet, or the prompt is over.
+  ended.set(agentId, patch)
+  trimMap(ended)
+  return settle($, agentId, patch)
 }
 
 // The small model judges a text easy / medium / hard; cut off after 8 s so it never holds a spawn or a prompt.
@@ -350,7 +475,11 @@ async function judge($: EngineInterface, text: string): Promise<Tier | undefined
 // Where one subagent runs: the caller's own model if named, else rules, else the small model's judgement,
 // else the prompt's tier, else mid. Rules and judgement are then checked against the log.
 async function route($: EngineInterface, e: { subagentType: string; description: string; prompt: string; model?: string; parentModel: string }, promptTier: Tier | undefined) {
-  if (e.model) return { tier: tierOf(e.model), model: undefined, why: 'given' as const }
+  if (e.model) return { tier: tierOf(e.model), model: undefined, why: e.description.startsWith(RETRY_PREFIX) ? ('retry' as const) : ('given' as const) }
+  // Your pins are final: no rules, judgement or learning after them.
+  const hay = `${e.subagentType} ${e.description}`.toLowerCase()
+  const pinned = [...TIERS].reverse().find(t => cfg.pins[t].some(w => hay.includes(w)))
+  if (pinned) return { tier: pinned, model: tierOf(e.parentModel) === pinned ? undefined : ALIAS[pinned], why: 'config' as const }
   let tier: Tier | undefined = TYPE_RULES[e.subagentType]
   let why: Spawn['why'] = 'rule'
   if (!tier) tier = WORD_RULES.find(([re]) => re.test(e.description))?.[1]
@@ -362,7 +491,7 @@ async function route($: EngineInterface, e: { subagentType: string; description:
     tier = promptTier ?? 'mid'
     why = 'default'
   }
-  const lifted = escalate(tier, await readLog($))
+  const lifted = escalate(tier, e.subagentType, await readLog($))
   if (lifted !== tier) {
     tier = lifted
     why = 'learned'
@@ -380,6 +509,7 @@ const titleOf = (text: string) => {
 // A prompt begins: it opens the log entry, draws the band if Claude has not got one going, and judges the
 // prompt's tier in the background.
 async function begin($: EngineInterface, text: string) {
+  retries = 0
   const now = await $.clock.now()
   const m = (await read($, meter)) ?? { tokens: 0, model: '' }
   const g = await read($, git)
@@ -423,7 +553,38 @@ async function finish($: EngineInterface, reason: string) {
   persist($, done)
 }
 
-export const register: Register = on => {
+// A table of how each tier and kind of helper has done, from the log: the last LEARN_WINDOW scored ones.
+function report(log: Entry[]): string {
+  const scored = log.flatMap(x => (Array.isArray(x.spawns) ? x.spawns : [])).filter(s => s.outcome && s.outcome !== 'running' && s.outcome !== 'aborted')
+  const row = (label: string, xs: Spawn[]) => {
+    const recent = xs.slice(-LEARN_WINDOW)
+    const ok = recent.filter(s => !failed(s.outcome)).length
+    const tok = recent.reduce((n, s) => n + (s.tokens ?? 0), 0)
+    return `${label.padEnd(18)} ${String(ok).padStart(2)}/${recent.length} ok · ${tok >= 1000 ? Math.round(tok / 1000) + 'k' : tok} tokens · ${xs.length} total`
+  }
+  const lines: string[] = []
+  for (const t of TIERS) {
+    const xs = scored.filter(s => s.tier === t)
+    if (xs.length) lines.push(row(`${LABEL_OF[t]} (${t})`, xs))
+  }
+  const kinds = [...new Set(scored.map(s => s.kind).filter((k): k is string => !!k))]
+  for (const k of kinds) {
+    for (const t of TIERS) {
+      const xs = scored.filter(s => s.kind === k && s.tier === t)
+      if (xs.length) lines.push(row(`  ${k} · ${t}`, xs))
+    }
+  }
+  const retried = scored.filter(s => s.why === 'retry').length
+  const pins = TIERS.filter(t => cfg.pins[t].length).map(t => `${t}: ${cfg.pins[t].join(', ')}`)
+  return [
+    lines.length ? lines.join('\n') : 'No helpers scored yet.',
+    `Reruns: ${cfg.retry ? 'on' : 'off'}${retried ? ` · ${retried} so far` : ''}`,
+    `Pinned: ${pins.length ? pins.join(' · ') : 'none'}`,
+  ].join('\n')
+}
+
+export const register: Register = (on, options) => {
+  cfg = readConfig(options)
   // Every prompt: logged, and the band drawn from it, so the band never waits on Claude calling set.
   on('prompt.submit', async ($, e, next) => {
     const r = await next(e)
@@ -437,7 +598,24 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined) {
+    if (e.agentId !== undefined) {
+      const id = e.agentId
+      answers.set(id, { reason: e.reason, answer: e.answer })
+      trimMap(answers)
+      waiting.get(id)?.()
+      try {
+        await agentEnded($, id, e)
+      } catch {
+        // Bookkeeping only: the subagent's answer is never touched.
+      }
+      // A failed helper is run again one tier up; its answer, if it worked, is shown beneath the first.
+      try {
+        const again = await retry($, id, e)
+        if (again !== undefined) return { ...r, text: again }
+      } catch {
+        // The first answer stands.
+      }
+    } else {
       try {
         await finish($, e.reason)
       } catch {
@@ -466,6 +644,7 @@ export const register: Register = on => {
     checkSync()
     syncTimer?.cancel()
     syncTimer = $.clock.every(4000, checkSync)
+    await $.command.register({ name: 'routing', description: 'How each model tier has done on helpers, and your overrides' }).catch(() => undefined)
     await $.tool.register({
       name: 'set',
       description: DESCRIPTION,
@@ -494,6 +673,8 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('command.run', { command: 'routing' }, async $ => ({ text: report(await readLog($)) }))
+
   // Wherever Claude can draw the band, tell it what the band is for.
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
@@ -505,12 +686,14 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     // Place the subagent on a tier first; a failure here only means it runs as asked.
     let input = e
+    let placed: { tier: Tier; why: Spawn['why'] } | undefined
     try {
       const cur = await read($, run)
       const d = await route($, e, cur?.tier)
+      placed = { tier: d.tier, why: d.why }
       if (d.model) input = { ...e, model: d.model }
       if (cur) {
-        const spawn: Spawn = { description: oneLine(e.description, 80), tier: d.tier, model: d.model ?? (e.model || e.parentModel), why: d.why }
+        const spawn: Spawn = { description: oneLine(e.description, 80), tier: d.tier, model: d.model ?? (e.model || e.parentModel), why: d.why, kind: e.subagentType }
         const upd: Entry = { ...cur, spawns: [...cur.spawns, spawn].slice(-20), tier: cur.tier && TIERS.indexOf(cur.tier) > TIERS.indexOf(d.tier) ? cur.tier : d.tier }
         await update($, run, () => upd)
         persist($, upd)
@@ -523,8 +706,11 @@ export const register: Register = on => {
       if (!r.deny && r.agentId && r.model) {
         const id = r.agentId
         const model = r.model
+        asked.set(id, { prompt: input.prompt, description: e.description, kind: e.subagentType, tier: placed?.tier ?? tierOf(model), why: placed?.why ?? 'given' })
+        trimMap(asked)
         // The latest 50 are plenty for the running ones, so a long session never piles them up.
         await update($, agentModels, a => Object.fromEntries([...Object.entries(a ?? {}).slice(-49), [id, model]]))
+        await attach($, oneLine(e.description, 80), id)
       }
     } catch {
       // Bookkeeping only: a failure here never touches the spawn.
@@ -538,6 +724,10 @@ export const register: Register = on => {
     const u = r?.usage
     if (u) {
       const n = u.input_tokens + u.cache_creation_input_tokens + u.output_tokens
+      if (e.agentId) {
+        agentTok.set(e.agentId, (agentTok.get(e.agentId) ?? 0) + n)
+        trimMap(agentTok)
+      }
       await update($, meter, m => ({ tokens: (m?.tokens ?? 0) + n, model: e.agentId ? (m?.model ?? '') : u.model }))
     }
     return r

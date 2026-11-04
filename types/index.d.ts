@@ -24,8 +24,21 @@ export type List = { title: string; items: Item[]; at?: number; tokAt?: number; 
 export type Tier = 'low' | 'mid' | 'high'
 // One subagent the router placed: what it was for, the tier it got, and why (given: the caller named a
 // model; rule: agent type or wording; classified: the small model judged it; learned: moved up after misses;
-// default: nothing else applied).
-export type Spawn = { description: string; tier: Tier; model: string; why: 'given' | 'rule' | 'classified' | 'learned' | 'default' }
+// default: nothing else applied; config: one of your overrides; retry: a failed helper run again one tier up).
+// The rest is filled in when the subagent ends: kind (its agent type), agentId, how it ended (empty: it answered
+// with nothing), and its own new tokens and milliseconds. Entries logged before these existed lack them.
+export type SpawnOutcome = 'running' | 'ok' | 'empty' | 'aborted' | 'error' | 'refused'
+export type Spawn = {
+  description: string
+  tier: Tier
+  model: string
+  why: 'given' | 'rule' | 'classified' | 'learned' | 'default' | 'config' | 'retry'
+  kind?: string
+  agentId?: string
+  outcome?: SpawnOutcome
+  tokens?: number
+  ms?: number
+}
 // One prompt in the log kept across sessions in the mod's store: what was asked, where (inside a git repo or
 // not), the tier it was judged to be, the subagents placed, the numbers (new tokens, ms) and how it ended.
 export type Entry = {
