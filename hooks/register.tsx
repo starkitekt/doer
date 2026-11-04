@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentModels, Git, Item, List, Meter, Status, Sync } from '../types'
+import type { AgentModels, Entry, Git, Item, List, Meter, Spawn, Status, Sync, Tier } from '../types'
 
 const list = atom({ plugin: 'live-checklist', key: 'list' } as const, null)
 const isOpen = atom({ plugin: 'live-checklist', key: 'isOpen' } as const, true)
@@ -13,6 +13,7 @@ const meter = atom({ plugin: 'live-checklist', key: 'meter' } as const, { tokens
 const git = atom({ plugin: 'live-checklist', key: 'git' } as const, null as Git | null)
 const sync = atom({ plugin: 'live-checklist', key: 'sync' } as const, null as Sync | null)
 const agentModels = atom({ plugin: 'live-checklist', key: 'agentModels' } as const, {} as AgentModels)
+const run = atom({ plugin: 'live-checklist', key: 'run' } as const, null as Entry | null)
 
 // The repo's one most urgent state, in this order: conflicts, checks failing, checks running,
 // unpushed commits, changed files, no remote, else clean. 'No repo' outside a git repo. Read-only: it runs
@@ -92,7 +93,7 @@ const oneLine = (v: unknown, max: number) =>
 // The band explains: each row is a problem the person would notice, and under it the fix in plain words.
 // It is its own layer, never a copy of a task list.
 const WORDING = [
-  'Each step is a problem and its fix. text: the problem as the person would notice it, in plain everyday words, under 8 words',
+  'Draw it with your first tool call of any multi-step task, in the same message, and update it as each step starts or finishes; do not skip it because another task list is shown. Each step is a problem and its fix. text: the problem as the person would notice it, in plain everyday words, under 8 words',
   "(e.g. 'Login sometimes fails'). fix: how it gets solved, one plain sentence anyone could follow, under 16 words",
   "(e.g. 'Retry the sign-in once before showing an error'). No code names, file names, tool names or jargon in either.",
   'Never copy steps from any other task list or plan into it: that list says what you do; this one explains what is wrong and how it gets fixed.',
@@ -162,17 +163,28 @@ const ALT: Record<Status, string> = { done: 'Done', active: 'In progress', pendi
 const TEXT_MARK: Record<Status, string> = { done: '✓', active: '◌', pending: '○', wait: '○' }
 
 // Re-read the git chip in the background, one read at a time, so a turn never waits on git or gh.
+// A request that arrives mid-read is not dropped: it queues one more read, so the chip never stays
+// on a state from before the latest change. A read that hangs is abandoned after 20 s, so the chip
+// can never lock up for the rest of the session.
 let reading = false
+let again = false
 function refreshGit($: EngineInterface) {
-  if (reading) return
+  if (reading) {
+    again = true
+    return
+  }
   reading = true
   const run: Run = (argv, timeoutMs) => $.process.run(argv, { timeoutMs })
-  void readGit(run)
-    .catch(() => null)
-    .then(g => update($, git, () => g))
+  const cap = $.clock.sleep(20000).then(() => undefined)
+  void Promise.race([readGit(run).catch(() => null), cap])
+    .then(g => (g === undefined ? undefined : update($, git, () => g)))
     .catch(() => undefined)
     .finally(() => {
       reading = false
+      if (again) {
+        again = false
+        refreshGit($)
+      }
     })
 }
 
@@ -221,6 +233,8 @@ async function applyList($: EngineInterface, rawTitle: unknown, raw: unknown[], 
     const free = (k: number) => k >= 0 && k < before.length && !used.has(k)
     let k = free(n) && before[n]?.text === text ? n : before.findIndex((b, j) => free(j) && b.text === text)
     if (k < 0 && prev?.title === title && free(n) && !texts.has(before[n]?.text ?? '')) k = n
+    // The mod's own opening row (drawn at prompt submit) hands its clock and tokens to Claude's first step.
+    if (k < 0 && prev?.source === 'auto' && n === 0 && free(0)) k = 0
     if (k < 0) return undefined
     used.add(k)
     return before[k]
@@ -259,10 +273,187 @@ async function applyList($: EngineInterface, rawTitle: unknown, raw: unknown[], 
   return next
 }
 
+// ---- Orchestration: which model each subagent runs on, and the prompt log behind it. ----
+// Tiers are relative (low < mid < high); an alias keeps them on the latest model of each kind.
+const TIERS: Tier[] = ['low', 'mid', 'high']
+const ALIAS: Record<Tier, string> = { low: 'haiku', mid: 'sonnet', high: 'opus' }
+const tierOf = (model: string): Tier => {
+  const k = /opus|fable/i.test(model) ? 'high' : /haiku/i.test(model) ? 'low' : 'mid'
+  return k
+}
+// Rule 1: by agent type. Search-like helpers are cheap; planners and reviewers are not.
+const TYPE_RULES: Record<string, Tier> = {
+  Explore: 'low',
+  'statusline-setup': 'low',
+  'claude-code-guide': 'low',
+  Plan: 'high',
+  'code-review': 'high',
+  'security-review': 'high',
+}
+// Rule 2: by what the description says. The costly words come first, so "search for security holes" goes up.
+const WORD_RULES: [RegExp, Tier][] = [
+  [/\b(architect\w*|design\w*|plan\w*|review\w*|audit\w*|debug\w*|diagnos\w*|root.?cause|security|migrat\w*|refactor\w*)\b/i, 'high'],
+  [/\b(search\w*|find|grep|list|locate|read|fetch|rename|format\w*|lint\w*|copy|move|count|summari[sz]e)\b/i, 'low'],
+]
+const LABELS = ['easy', 'medium', 'hard'] as const
+const FROM_LABEL: Record<string, Tier> = { easy: 'low', medium: 'mid', hard: 'high' }
+const LOG_KEY = 'prompts'
+const LOG_MAX = 200
+const LEARN_WINDOW = 8
+const LEARN_MIN = 3
+
+const isEntry = (v: unknown): v is Entry => typeof v === 'object' && v !== null && typeof (v as Entry).id === 'string' && typeof (v as Entry).outcome === 'string'
+
+// The log, oldest first. Whatever the store holds is checked, so a bad file never breaks routing.
+async function readLog($: EngineInterface): Promise<Entry[]> {
+  try {
+    const v = await $.store.get(LOG_KEY)
+    return Array.isArray(v) ? v.filter(isEntry) : []
+  } catch {
+    return []
+  }
+}
+
+// Writes are queued one after another, so two quick updates never overwrite each other.
+let logChain: Promise<unknown> = Promise.resolve()
+function persist($: EngineInterface, entry: Entry) {
+  logChain = logChain
+    .then(async () => {
+      const log = await readLog($)
+      const at = log.findIndex(x => x.id === entry.id)
+      if (at >= 0) log[at] = entry
+      else log.push(entry)
+      await $.store.set(LOG_KEY, log.slice(-LOG_MAX))
+    })
+    .catch(() => undefined)
+}
+
+// Learning: a tier whose last few finished prompts mostly failed is moved up one for the next subagents.
+function escalate(tier: Tier, log: Entry[]): Tier {
+  const seen = log.filter(x => x.tier === tier && x.outcome !== 'running').slice(-LEARN_WINDOW)
+  const bad = seen.filter(x => x.outcome !== 'ok').length
+  const up = TIERS[TIERS.indexOf(tier) + 1]
+  return seen.length >= LEARN_MIN && bad / seen.length >= 0.5 && up ? up : tier
+}
+
+// The small model judges a text easy / medium / hard; cut off after 8 s so it never holds a spawn or a prompt.
+async function judge($: EngineInterface, text: string): Promise<Tier | undefined> {
+  try {
+    const cap = $.clock.sleep(8000).then(() => undefined)
+    const label = await Promise.race([$.model.classify(text.slice(0, 700), LABELS), cap])
+    return label ? FROM_LABEL[label] : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Where one subagent runs: the caller's own model if named, else rules, else the small model's judgement,
+// else the prompt's tier, else mid. Rules and judgement are then checked against the log.
+async function route($: EngineInterface, e: { subagentType: string; description: string; prompt: string; model?: string; parentModel: string }, promptTier: Tier | undefined) {
+  if (e.model) return { tier: tierOf(e.model), model: undefined, why: 'given' as const }
+  let tier: Tier | undefined = TYPE_RULES[e.subagentType]
+  let why: Spawn['why'] = 'rule'
+  if (!tier) tier = WORD_RULES.find(([re]) => re.test(e.description))?.[1]
+  if (!tier) {
+    tier = await judge($, `${e.description}\n${e.prompt}`)
+    why = 'classified'
+  }
+  if (!tier) {
+    tier = promptTier ?? 'mid'
+    why = 'default'
+  }
+  const lifted = escalate(tier, await readLog($))
+  if (lifted !== tier) {
+    tier = lifted
+    why = 'learned'
+  }
+  // The parent's own tier is what inherit gives, so there is nothing to rewrite.
+  return { tier, model: tierOf(e.parentModel) === tier ? undefined : ALIAS[tier], why }
+}
+
+// A short title from the prompt: its first sentence, cut at 60.
+const titleOf = (text: string) => {
+  const first = oneLine(text.split(/[.!?\n]/).find(s => s.trim()) ?? text, 200)
+  return first.length > 60 ? first.slice(0, 59).trimEnd() + '…' : first
+}
+
+// A prompt begins: it opens the log entry, draws the band if Claude has not got one going, and judges the
+// prompt's tier in the background.
+async function begin($: EngineInterface, text: string) {
+  const now = await $.clock.now()
+  const m = (await read($, meter)) ?? { tokens: 0, model: '' }
+  const g = await read($, git)
+  const entry: Entry = {
+    id: String(now),
+    at: now,
+    text: oneLine(text, 160),
+    where: g && g.label !== 'No repo' ? 'repo' : 'local',
+    spawns: [],
+    startTok: m.tokens,
+    tokens: 0,
+    ms: 0,
+    outcome: 'running',
+  }
+  await update($, run, () => entry)
+  persist($, entry)
+  // A step Claude is already running (a prompt sent mid-turn) keeps its own list.
+  const prev = await read($, list)
+  if (!(prev?.source === 'set' && prev.items.some(i => i.status === 'active'))) {
+    await applyList($, titleOf(text), [{ text: 'Your request is still open', status: 'active' }], 'auto')
+  }
+  void judge($, text).then(async tier => {
+    if (!tier) return
+    const cur = await read($, run)
+    if (cur?.id !== entry.id) return
+    const next = { ...cur, tier: TIERS[Math.max(TIERS.indexOf(tier), cur.tier ? TIERS.indexOf(cur.tier) : 0)] }
+    await update($, run, () => next)
+    persist($, next)
+  }).catch(() => undefined)
+}
+
+// The prompt ends: its numbers and outcome go to the log.
+async function finish($: EngineInterface, reason: string) {
+  const cur = await read($, run)
+  if (!cur) return
+  const now = await $.clock.now()
+  const m = (await read($, meter)) ?? { tokens: 0, model: '' }
+  const outcome: Entry['outcome'] = reason === 'answer' ? 'ok' : reason === 'aborted' ? 'aborted' : reason === 'refusal' ? 'refused' : 'error'
+  const done: Entry = { ...cur, tokens: Math.max(0, m.tokens - cur.startTok), ms: Math.max(0, now - cur.at), outcome }
+  await update($, run, () => null)
+  persist($, done)
+}
+
 export const register: Register = on => {
+  // Every prompt: logged, and the band drawn from it, so the band never waits on Claude calling set.
+  on('prompt.submit', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      if (!r.drop && !e.isMeta && !e.command && r.text.trim() && !r.text.trim().startsWith('/')) await begin($, r.text)
+    } catch {
+      // Bookkeeping only: the prompt itself is never touched.
+    }
+    return r
+  })
+
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined) refreshGit($)
+    if (e.agentId === undefined) {
+      try {
+        await finish($, e.reason)
+      } catch {
+        // Bookkeeping only.
+      }
+      refreshGit($)
+      // Whatever the turn was doing is over: a step left running (Claude did not send a last update,
+      // or the app has no wrap_up) is ticked off, so the ring never spins on a finished turn.
+      try {
+        const prev = await read($, list)
+        if (prev?.items.some(i => i.status === 'active'))
+          await applyList($, prev.title, prev.items.map(i => ({ ...i, status: i.status === 'active' ? 'done' : i.status })), 'set')
+      } catch {
+        // Bookkeeping only: the turn's end is never touched.
+      }
+    }
     return r
   })
 
@@ -312,7 +503,22 @@ export const register: Register = on => {
 
   // Note the model each subagent starts on, so an active step with no fix can show what its agent is on.
   on('agent.spawn', async ($, e, next) => {
-    const r = await next(e)
+    // Place the subagent on a tier first; a failure here only means it runs as asked.
+    let input = e
+    try {
+      const cur = await read($, run)
+      const d = await route($, e, cur?.tier)
+      if (d.model) input = { ...e, model: d.model }
+      if (cur) {
+        const spawn: Spawn = { description: oneLine(e.description, 80), tier: d.tier, model: d.model ?? (e.model || e.parentModel), why: d.why }
+        const upd: Entry = { ...cur, spawns: [...cur.spawns, spawn].slice(-20), tier: cur.tier && TIERS.indexOf(cur.tier) > TIERS.indexOf(d.tier) ? cur.tier : d.tier }
+        await update($, run, () => upd)
+        persist($, upd)
+      }
+    } catch {
+      input = e
+    }
+    const r = await next(input)
     try {
       if (!r.deny && r.agentId && r.model) {
         const id = r.agentId
@@ -390,6 +596,10 @@ export const register: Register = on => {
     const rawPct = usage?.context.percent
     const pct = typeof rawPct === 'number' && Number.isFinite(rawPct) ? Math.min(100, Math.max(0, Math.round(rawPct))) : undefined
     const total = runTotal(l.items)
+    // Where this prompt's subagents went: "Haiku 2 · Opus 1".
+    const placed = new Map<string, number>()
+    for (const sp of (await read($, run))?.spawns ?? []) placed.set(shortModel(sp.model), (placed.get(shortModel(sp.model)) ?? 0) + 1)
+    const routed = [...placed].map(([k, n]) => `${k} ${n}`).join(' · ')
     // The line under each step: its fix; an active step with none shows what a running subagent on
     // the step's model is on.
     const models = (await read($, agentModels)) ?? {}
@@ -487,6 +697,11 @@ export const register: Register = on => {
               {l.title}
             </Text>
           </Box>
+          {routed ? (
+            <Text key="routed" size="footnote" color={P.grey} wrap="truncate-end">
+              {routed}
+            </Text>
+          ) : null}
           {total ? (
             <Text key="total" size="footnote" color={P.grey} tabular>
               {total}

@@ -48,6 +48,22 @@ Every row is a problem, in plain words as you would notice it, and under it a di
 
 The mod adds this to Claude's system prompt whenever it can draw the band, and tells it never to copy steps from the app's task list. An active step with no fix shows what a running subagent on its model is on, as `Agent: …`.
 
+## Model orchestration
+
+Subagents are placed on a tier instead of all running on one model. Tiers are relative: **low** (Haiku), **mid** (Sonnet), **high** (Opus or Fable), set by alias so they follow the latest model of each kind. For each spawn, in order:
+
+1. A model the caller named is kept.
+2. **Rules:** by agent type (`Explore` low; `Plan`, `code-review`, `security-review` high), then by the description's wording (*find, list, read, rename* low; *plan, review, audit, debug, refactor, security* high).
+3. **Judgement:** otherwise the small model rates the task easy, medium or hard (8 s limit).
+4. If that fails, the prompt's own tier, else mid.
+5. **Learning:** if the last 8 finished prompts at a tier mostly failed (at least 3, half or more), the tier moves up one.
+
+A tier equal to the parent's is left as inherit. The header shows where this prompt's subagents went, `Haiku 2 · Opus 1`. A failure in any step lets the spawn run as asked.
+
+## Prompt log
+
+Every prompt is logged across sessions in the mod's store under `prompts` (latest 200): the prompt (160 characters), `where` it ran (`repo` or `local`), its tier, the subagents placed with the reason for each, the tokens and milliseconds it took, and how it ended (`ok`, `aborted`, `error`, `refused`). It is stored on your machine only. Delete the `prompts` key to clear it.
+
 ## Install
 
 At the prompt of a Claude Code terminal session:
@@ -70,7 +86,7 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 
 The mod gives Claude a tool, `set`. Claude calls it with a title and a list of steps, each a problem (`text`), its `fix` and a status (`done`, `active`, `pending` or `wait`), whenever a step starts or finishes. Titles, problems and fixes are kept to one line; a step with no text is skipped, and a blank title reads `Tasks`.
 
-Only `set` fills the band; the app's own task list never does. When a turn ends, the step still running is ticked off with its tokens and time. Run `claude plugin test .` for the test suite in `tests/`. To make it a habit, add a line like this to your `CLAUDE.md`:
+The band does not wait for `set`: every prompt draws it at once (a title from the prompt and one open row), so it shows in every chat. When Claude calls `set` its list takes over; a prompt sent while a step is running keeps that list. Slash commands never draw it. The app's own task list never fills it. When a turn ends, the step still running is ticked off with its tokens and time. Run `claude plugin test .` for the test suite in `tests/`. To make it a habit, add a line like this to your `CLAUDE.md`:
 
 > For every multi-step task, explain each problem and its fix with the live-checklist tool, and update it at each step.
 

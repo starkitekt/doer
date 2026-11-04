@@ -25,6 +25,7 @@ type World = {
   usage?: { percent?: number } | 'throw'
   agents?: unknown[] | 'throw'
   spawn?: unknown
+  seen?: any[]
   git?: (argv: readonly string[]) => Proc
   sync?: { text: string; mtime: number } | null
   plan?: 'ok' | 'error' | 'deny'
@@ -62,7 +63,11 @@ async function boot($: $T, on: OnT, w: World = {}) {
     if (w.agents === 'throw') throw new Error('agents down')
     return { value: w.agents ?? [] } as any
   })
-  on('agent.spawn', () => (w.spawn ?? { model: 'claude-haiku-5-5', agentId: 'a1' }) as any)
+  on('agent.spawn', (_, e) => {
+    w.seen?.push(e)
+    return (w.spawn ?? (w.seen ? { model: (e as any).model ?? 'claude-opus-5-5', agentId: 'a' + w.seen.length } : { model: 'claude-haiku-5-5', agentId: 'a1' })) as any
+  })
+
   // The app's own task list tools, answered as the app would.
   on('tool.call', { tool: PLAN } as any, () =>
     (w.plan === 'deny' ? { deny: 'no' } : w.plan === 'error' ? { result: 'bad', text: 'bad', isError: true } : { result: 'Plan shown.' }) as any)
@@ -520,4 +525,154 @@ test('only a prompt that can draw the band is told what it is for, once', async 
   const text = (await compose([SET]))[1]?.text ?? ''
   expect(text).toContain('Never copy steps')
   expect(text).toContain('fix:')
+})
+
+// ---- Consistency ----------------------------------------------------------------------------
+
+const END = { reason: 'answer', answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1' } as any
+
+test("the turn's end finishes a step left running, with or without wrap_up", async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const { set, clock, draw } = await boot($, on)
+  await set({ title: 'T', items: [step('a', 'active', { fix: 'f' })] })
+  await clock.advance(MIN)
+  await $.turn.complete(END)
+  const d = await draw()
+  expect(states(d.svgs)).toEqual(['Done'])
+  expect(d.all.some(t => t.endsWith('/ 1m'))).toBe(true)
+})
+
+// ---- Orchestration: auto-drawn band, prompt log, model router --------------------------------
+
+type Orch = { store: Record<string, unknown>; seen: any[]; labels: string | 'throw' }
+// The engine beneath: a prompt that passes, an in-memory store, the small model's label, and the model each spawn got.
+function orchestra($: $T, on: OnT, o: Partial<Orch> = {}) {
+  const w: Orch = { store: {}, seen: [], labels: 'medium', ...o }
+  on('prompt.submit', (_, e) => ({ text: (e as any).text }) as any)
+  on('store.get', (_, e) => ({ value: w.store[(e as any).key] }) as any)
+  on('store.set', (_, e) => {
+    w.store[(e as any).key] = (e as any).value
+    return { value: undefined } as any
+  })
+  on('model.classify', () => {
+    if (w.labels === 'throw') throw new Error('model down')
+    return { value: w.labels } as any
+  })
+  return w
+}
+const spawnOf = async ($: $T, description: string, subagentType = 'general-purpose', extra: object = {}) =>
+  $.agent.spawn({ prompt: 'p', description, subagentType, ...extra } as any)
+
+test('a prompt draws the band by itself, with a title from the prompt', async ($, on) => {
+  const w = orchestra($, on)
+  const { draw } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Fix the login bug. It fails on Safari.' })
+  const d = await draw()
+  expect(d.all).toContain('Fix the login bug')
+  expect(d.all).toContain('Your request is still open')
+})
+
+test('slash commands and empty prompts leave the band alone', async ($, on) => {
+  const w = orchestra($, on)
+  const { draw } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: '/help' })
+  await $.prompt.submit({ text: '   ' })
+  expect((await draw()).all).toEqual(['engine'])
+})
+
+test("Claude's own list replaces the auto row and keeps its clock", async ($, on) => {
+  const w = orchestra($, on)
+  const { set, clock, draw } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Build the thing' })
+  await clock.advance(MIN)
+  await set({ title: 'T', items: [step('a', 'done', { fix: 'f' })] })
+  const d = await draw()
+  expect(d.all).toContain('a')
+  expect(d.all).not.toContain('Your request is still open')
+  expect(d.all.some(t => t.endsWith('/ 1m'))).toBe(true)
+})
+
+test('a prompt sent while Claude runs a step keeps that list', async ($, on) => {
+  const w = orchestra($, on)
+  const { set, draw } = await boot($, on, { seen: w.seen })
+  await set({ title: 'Mine', items: [step('a', 'active', { fix: 'f' })] })
+  await $.prompt.submit({ text: 'also do this' })
+  const d = await draw()
+  expect(d.all).toContain('Mine')
+  expect(d.all).not.toContain('also do this')
+})
+
+test('the log keeps the prompt, where it ran, its numbers and how it ended', async ($, on) => {
+  on('turn.complete', () => ({ text: 'ok' }) as any)
+  const w = orchestra($, on)
+  const { clock } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Do a thing' })
+  await clock.advance(MIN)
+  await $.turn.complete(END)
+  await clock.settle()
+  const log = w.store.prompts as any[]
+  expect(log).toHaveLength(1)
+  expect(log[0]).toMatchObject({ text: 'Do a thing', where: 'local', outcome: 'ok', ms: MIN })
+  expect(log[0].tier).toBe('mid')
+})
+
+test('a bad store never breaks a prompt, and the log stays bounded', async ($, on) => {
+  const w = orchestra($, on, { store: { prompts: 'garbage' } })
+  const { draw } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'one' })
+  expect((await draw()).all).toContain('one')
+  w.store.prompts = Array.from({ length: 250 }, (_, i) => ({ id: 'x' + i, outcome: 'ok', spawns: [], text: '' }))
+  await $.prompt.submit({ text: 'two' })
+  await ($ as any).clock?.settle?.()
+  expect((w.store.prompts as any[]).length).toBeLessThanOrEqual(200)
+})
+
+test('the router: agent type and wording first, then the small model, then the prompt', async ($, on) => {
+  const w = orchestra($, on, { labels: 'hard' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'look around', 'Explore')
+  await spawnOf($, 'sketch it', 'Plan')
+  await spawnOf($, 'find the config files')
+  await spawnOf($, 'audit the auth code')
+  await spawnOf($, 'make it nicer')
+  const models = w.seen.map(s => s.model)
+  expect(models[0]).toBe('haiku')
+  expect(models[1]).toBe('opus')
+  expect(models[2]).toBe('haiku')
+  expect(models[3]).toBe('opus')
+  expect(models[4]).toBe('opus')
+})
+
+test('the router: a model the caller named is kept; a down classifier falls back to mid', async ($, on) => {
+  const w = orchestra($, on, { labels: 'throw' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'make it nicer', 'general-purpose', { model: 'haiku' })
+  await spawnOf($, 'make it nicer')
+  expect(w.seen[0].model).toBe('haiku')
+  expect(w.seen[1].model === undefined || w.seen[1].model === 'sonnet').toBe(true)
+})
+
+test('the router learns: a tier that kept failing is moved up', async ($, on) => {
+  const bad = Array.from({ length: 4 }, (_, i) => ({ id: 'b' + i, tier: 'mid', outcome: 'error', spawns: [], text: '' }))
+  const w = orchestra($, on, { store: { prompts: bad }, labels: 'medium' })
+  await boot($, on, { seen: w.seen })
+  await spawnOf($, 'make it nicer')
+  expect(w.seen[0].model).toBe('opus')
+})
+
+test('the router never blocks a spawn when the store or the classifier fail', async ($, on) => {
+  const w = orchestra($, on, { labels: 'throw', store: { prompts: 42 } })
+  await boot($, on, { seen: w.seen })
+  const r = await spawnOf($, 'whatever it is')
+  expect(JSON.stringify(r)).toContain('agentId')
+  expect(w.seen).toHaveLength(1)
+})
+
+test('the header says where the subagents went', async ($, on) => {
+  const w = orchestra($, on)
+  const { draw } = await boot($, on, { seen: w.seen })
+  await $.prompt.submit({ text: 'Big job' })
+  await spawnOf($, 'look around', 'Explore')
+  await spawnOf($, 'look again', 'Explore')
+  expect((await draw()).all).toContain('Haiku 2')
 })

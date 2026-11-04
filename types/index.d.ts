@@ -18,7 +18,28 @@ export type Item = {
 }
 // at / tokAt: clock and token meter at the last update, the start for a step done without being active.
 // source: what drew it; only the mod's own set tool does.
-export type List = { title: string; items: Item[]; at?: number; tokAt?: number; source?: 'set' }
+// source: what drew it; 'set' is Claude's set tool, 'auto' is the mod itself at prompt submit.
+export type List = { title: string; items: Item[]; at?: number; tokAt?: number; source?: 'set' | 'auto' }
+// Model tiers, relative: low < mid < high (today Haiku, Sonnet, Opus or Fable).
+export type Tier = 'low' | 'mid' | 'high'
+// One subagent the router placed: what it was for, the tier it got, and why (given: the caller named a
+// model; rule: agent type or wording; classified: the small model judged it; learned: moved up after misses;
+// default: nothing else applied).
+export type Spawn = { description: string; tier: Tier; model: string; why: 'given' | 'rule' | 'classified' | 'learned' | 'default' }
+// One prompt in the log kept across sessions in the mod's store: what was asked, where (inside a git repo or
+// not), the tier it was judged to be, the subagents placed, the numbers (new tokens, ms) and how it ended.
+export type Entry = {
+  id: string
+  at: number
+  text: string
+  where: 'repo' | 'local'
+  tier?: Tier
+  spawns: Spawn[]
+  startTok: number
+  tokens: number
+  ms: number
+  outcome: 'running' | 'ok' | 'aborted' | 'error' | 'refused'
+}
 // tokens: new tokens across every model response this session (input, cache writes, output).
 // model: the model that last answered on the main thread.
 export type Meter = { tokens: number; model: string }
@@ -39,6 +60,7 @@ declare module 'claude-code' {
       git: Git | null
       sync: Sync | null
       agentModels: AgentModels
+      run: Entry | null
     }
   }
 }
