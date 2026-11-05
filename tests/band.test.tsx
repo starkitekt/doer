@@ -462,6 +462,15 @@ test('the bar follows the file as it changes, and goes when the file does', asyn
   expect((await draw()).svgs).toContain('0% done')
 })
 
+test('a finished task shows a full bar for a few seconds, then it goes', async ($, on) => {
+  const { set, draw, clock } = await boot($, on)
+  await set({ title: 'T', items: [step('a', 'done'), step('b', 'active')] })
+  await set({ title: 'T', items: [step('a', 'done'), step('b', 'done')] })
+  expect((await draw()).svgs).toContain('100% done')
+  await clock.advance(6000)
+  expect((await draw()).svgs.some(s => s.endsWith('% done'))).toBe(false)
+})
+
 test('a finished step shows no bar', async ($, on) => {
   const { set, draw } = await boot($, on, { progress: { text: '5 10', mtime: FRESH } })
   await set({ title: 'T', items: [step('a', 'done'), step('b', 'pending')] })

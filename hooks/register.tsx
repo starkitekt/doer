@@ -157,6 +157,7 @@ const GLYPHS = { light: glyphs(PALETTES.light), dark: glyphs(PALETTES.dark), mid
 // hourglass whose sand falls from the top bulb to the bottom (then it turns over), 21 blocks, and the number.
 // 18 + 6 + 84 + 6 + 34 = 148 px.
 const BAR_W = 148
+const FULL_MS = 5000 // how long a finished task keeps its full bar
 const TRACK_X = 24
 const SEGS = 21
 const PX = 2
@@ -323,6 +324,16 @@ async function applyList($: EngineInterface, rawTitle: unknown, raw: unknown[], 
     })
   const next: List | null = items.length ? { title, items, at: now, tokAt: m.tokens, source } : null
   await update($, list, () => next)
+  // When the last step finishes, the bar shows full for a few seconds before it goes: redraw once it is over.
+  if (next && next.items.every(i => i.status === 'done')) {
+    void $.clock
+      .sleep(FULL_MS)
+      .then(async () => {
+        const cur = await read($, list)
+        if (cur && cur.at === next.at) await update($, list, l => (l ? { ...l } : l))
+      })
+      .catch(() => undefined)
+  }
   return next
 }
 
@@ -868,6 +879,9 @@ export const register: Register = (on, options) => {
     // Whole-task bar: finished steps plus the running step's share (from the job file, if fresh).
     const stepFrac = prog ? prog.done / prog.total : 0
     const progPct = Math.min(100, Math.round(((done.length + stepFrac) / Math.max(1, l.items.length)) * 100))
+    // A task that has just finished keeps a full bar on its last step for a few seconds, then it goes.
+    const justDone = l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
+    const lastItem = l.items[l.items.length - 1]
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -903,12 +917,12 @@ export const register: Register = (on, options) => {
           <Text key="t" color={isDone ? P.accent : 'text'} weight="regular" wrap="truncate-end">
             {i.text}
           </Text>
-          {isNow ? (
+          {isNow || (justDone && i === lastItem) ? (
             graphic ? (
-              <Svg key="w" source={bar(P, progPct)} alt={`${progPct}% done`} width={BAR_W} height={LINE} isInteractive />
+              <Svg key="w" source={bar(P, justDone ? 100 : progPct)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
             ) : (
               <Text key="w" color={P.grey} tabular>
-                {`${progPct}%`}
+                {`${justDone ? 100 : progPct}%`}
               </Text>
             )
           ) : null}
