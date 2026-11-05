@@ -898,6 +898,9 @@ export const register: Register = (on, options) => {
     const justDone =
       progPct !== undefined && l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
     const lastItem = l.items[l.items.length - 1]
+    // A live job with no step marked running still belongs to the first step left open.
+    const jobRunning = progPct !== undefined && progPct < 100 && !l.items.some(i => i.status === 'active')
+    const jobItem = jobRunning ? rest[0] : undefined
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -933,7 +936,7 @@ export const register: Register = (on, options) => {
           <Text key="t" color={isDone ? P.accent : 'text'} weight="regular" wrap="truncate-end">
             {i.text}
           </Text>
-          {isNow || (justDone && i === lastItem) ? (
+          {isNow || i === jobItem || (justDone && i === lastItem) ? (
             graphic && progPct !== undefined ? (
               <Svg key="w" source={bar(P, justDone ? 100 : progPct)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
             ) : graphic ? (
