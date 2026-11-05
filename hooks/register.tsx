@@ -153,15 +153,8 @@ const glyphs = (p: Palette): Record<Status, string> => {
 }
 const GLYPHS = { light: glyphs(PALETTES.light), dark: glyphs(PALETTES.dark), mid: glyphs(PALETTES.mid) }
 
-// 'in progress' beside the active step, in the app's serif (Tiempos Text italic, else Georgia).
-// Text has no font setting, so it is a small SVG: 14 px, 5.03 em wide in Tiempos (Georgia 5.07),
-// on the same baseline as the body text beside it.
-const BUSY_W = 74
-const busy = (color: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${BUSY_W}" height="${LINE}" viewBox="0 0 ${BUSY_W} ${LINE}"><text x="0" y="${BASE}" font-family="'Test Tiempos Text', 'Tiempos Text', Tiempos, Georgia, serif" font-style="italic" font-size="14" fill="${color}">in progress</text></svg>`
-
-// With a progress file, the active step shows a pixel fill bar in place of 'in progress': a pixel hourglass whose
-// sand falls from the top bulb to the bottom (then it turns over), 21 blocks filled to the percentage, and the number.
+// The active step shows a pixel fill bar for the whole task (finished steps plus the running step's share): a pixel
+// hourglass whose sand falls from the top bulb to the bottom (then it turns over), 21 blocks, and the number.
 // 18 + 6 + 84 + 6 + 34 = 148 px.
 const BAR_W = 148
 const TRACK_X = 24
@@ -846,7 +839,6 @@ export const register: Register = (on, options) => {
     const g = await read($, git)
     const s = await read($, sync)
     const prog = await read($, progress)
-    const progPct = prog ? Math.round((prog.done / prog.total) * 100) : undefined
     // Context gauge: grey, amber from 75%, red from 85% (auto-compact is near).
     const usage = await $.session.usage().catch(() => undefined)
     // Rounded first, so the colour matches the number shown; not a number, no gauge.
@@ -873,6 +865,9 @@ export const register: Register = (on, options) => {
 
     const done = l.items.filter(i => i.status === 'done')
     const rest = l.items.filter(i => i.status !== 'done')
+    // Whole-task bar: finished steps plus the running step's share (from the job file, if fresh).
+    const stepFrac = prog ? prog.done / prog.total : 0
+    const progPct = Math.min(100, Math.round(((done.length + stepFrac) / Math.max(1, l.items.length)) * 100))
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -909,17 +904,11 @@ export const register: Register = (on, options) => {
             {i.text}
           </Text>
           {isNow ? (
-            graphic && progPct !== undefined ? (
+            graphic ? (
               <Svg key="w" source={bar(P, progPct)} alt={`${progPct}% done`} width={BAR_W} height={LINE} isInteractive />
-            ) : graphic ? (
-              <Svg key="w" source={busy(P.grey)} alt="in progress" width={BUSY_W} height={LINE} />
-            ) : progPct !== undefined ? (
+            ) : (
               <Text key="w" color={P.grey} tabular>
                 {`${progPct}%`}
-              </Text>
-            ) : (
-              <Text key="w" color={P.grey} italic>
-                in progress
               </Text>
             )
           ) : null}
