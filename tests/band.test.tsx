@@ -28,6 +28,7 @@ type World = {
   seen?: any[]
   git?: (argv: readonly string[]) => Proc
   sync?: { text: string; mtime: number } | null
+  progress?: { text: string; mtime: number } | null
   plan?: 'ok' | 'error' | 'deny'
 }
 
@@ -43,13 +44,16 @@ async function boot($: $T, on: OnT, w: World = {}) {
   on('tool.register', () => ({ value: { tool: SET } }) as any)
   on('session.start', (_, e) => ({ cwd: (e as any).cwd }) as any)
   on('process.run', (_, e) => proc((w.git ?? (() => 'throw' as const))((e as any).argv)) as any)
-  on('fs.stat', () => {
-    if (!w.sync) throw new Error('ENOENT')
-    return { value: { kind: 'file', size: w.sync.text.length, mtimeMs: w.sync.mtime, isLink: false } } as any
+  const file = (e: unknown) => (String((e as any).path ?? '').endsWith('progress.count') ? w.progress : w.sync)
+  on('fs.stat', (_, e) => {
+    const f = file(e)
+    if (!f) throw new Error('ENOENT')
+    return { value: { kind: 'file', size: f.text.length, mtimeMs: f.mtime, isLink: false } } as any
   })
-  on('fs.read', () => {
-    if (!w.sync) throw new Error('ENOENT')
-    return { value: w.sync.text } as any
+  on('fs.read', (_, e) => {
+    const f = file(e)
+    if (!f) throw new Error('ENOENT')
+    return { value: f.text } as any
   })
   on('config.list', () => {
     if (w.configThrows) throw new Error('config down')
@@ -397,6 +401,74 @@ test('the sync counter follows the file as it changes', async ($, on) => {
   world.sync = null
   await clock.advance(4000)
   expect((await draw()).all.some(t => t.includes('pushed'))).toBe(false)
+})
+
+// ---- Progress bar on the active step ----------------------------------------------------------
+// ~/.claude/progress.count holds "<done> <total>". The bar replaces 'in progress' on the active row only.
+
+const FRESH = 1_000_000
+const PROGRESS_CASES: { name: string; text: string | null; mtime?: number; pct: number | null }[] = [
+  { name: 'missing file', text: null, pct: null },
+  { name: 'half done', text: '5 10', pct: 50 },
+  { name: 'padding and newline', text: '  1 4\n', pct: 25 },
+  { name: 'finished', text: '280 280', pct: 100 },
+  { name: 'over the total is capped', text: '12 10', pct: 100 },
+  { name: 'zero total', text: '3 0', pct: null },
+  { name: 'garbage', text: 'hello world', pct: null },
+  { name: 'one number', text: '5', pct: null },
+  { name: 'negative', text: '-2 10', pct: null },
+  { name: 'older than 15 minutes', text: '5 10', mtime: FRESH - 16 * MIN, pct: null },
+]
+
+for (const c of PROGRESS_CASES) {
+  test(`progress bar: ${c.name}`, async ($, on) => {
+    const { set, draw } = await boot($, on, { progress: c.text === null ? null : { text: c.text, mtime: c.mtime ?? FRESH } })
+    await set({ title: 'T', items: [step('a', 'done'), step('b', 'active'), step('c', 'pending')] })
+    const d = await draw()
+    if (c.pct === null) {
+      expect(d.svgs).toContain('in progress')
+      expect(d.svgs.some(s => s.endsWith('% done'))).toBe(false)
+    } else {
+      expect(d.svgs).toContain(`${c.pct}% done`)
+      expect(d.svgs).not.toContain('in progress')
+      // Only the active row gets it, and the ring stays.
+      expect(d.svgs.filter(s => s.endsWith('% done'))).toHaveLength(1)
+      expect(d.svgs).toContain('In progress')
+    }
+  })
+}
+
+test('the terminal shows the percentage as text', async ($, on) => {
+  const { set, draw } = await boot($, on, { progress: { text: '3 4', mtime: FRESH } })
+  await set({ title: 'T', items: [step('a', 'active')] })
+  const d = await draw('terminal')
+  expect(d.all).toContain('75%')
+  expect(d.all).not.toContain('in progress')
+})
+
+test('the terminal keeps the old words without a progress file', async ($, on) => {
+  const { set, draw } = await boot($, on)
+  await set({ title: 'T', items: [step('a', 'active')] })
+  expect((await draw('terminal')).all).toContain('in progress')
+})
+
+test('the bar follows the file as it changes, and goes when the file does', async ($, on) => {
+  const world: World = { progress: { text: '1 4', mtime: FRESH } }
+  const { set, draw, clock } = await boot($, on, world)
+  await set({ title: 'T', items: [step('a', 'active')] })
+  expect((await draw()).svgs).toContain('25% done')
+  world.progress = { text: '2 4', mtime: FRESH + 1 }
+  await clock.advance(4000)
+  expect((await draw()).svgs).toContain('50% done')
+  world.progress = null
+  await clock.advance(4000)
+  expect((await draw()).svgs).toContain('in progress')
+})
+
+test('a finished step shows no bar', async ($, on) => {
+  const { set, draw } = await boot($, on, { progress: { text: '5 10', mtime: FRESH } })
+  await set({ title: 'T', items: [step('a', 'done'), step('b', 'pending')] })
+  expect((await draw()).svgs.some(s => s.endsWith('% done'))).toBe(false)
 })
 
 // ---- Agent line from subagents ------------------------------------------------------------

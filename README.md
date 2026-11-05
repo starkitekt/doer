@@ -32,6 +32,8 @@ The chip refreshes when a session starts and when each turn ends, in the backgro
 
 If a script of yours syncs a repository on its own (a Stop hook that commits and pushes, say), it can write `<pushed> <failed> <ok|fail>` to `~/.claude/autosync.count`. The header then shows `4 pushed · 1 failed` at the right, red when the last sync failed. Without that file there is no counter.
 
+A long job (a render, a batch) can write `<done> <total>` to `~/.claude/progress.count`. The step that is running then shows a pixel-art fill bar (21 blocks) with a pixel hourglass whose sand falls top to bottom before it turns over, and the percentage, in place of the words "in progress"; the dotted ring beside it stays. In the terminal it shows the percentage as text. The file is read every few seconds and ignored once it is 15 minutes old, so a finished job's number never lingers. Without that file the step reads "in progress" as before.
+
 ## Run total and context gauge
 
 Once a step is done, the header shows the run so far at the right: `14m · 84k T`, the time and tokens of every done step added up. Beside it, `Context 64%` is how full the session's context window is. It is grey, turns amber from 75% and red from 85%, so you see auto-compact coming.

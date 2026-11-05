@@ -5,13 +5,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentModels, Entry, Git, Item, List, Meter, Spawn, Status, Sync, Tier } from '../types'
+import type { AgentModels, Entry, Git, Item, List, Meter, Progress, Spawn, Status, Sync, Tier } from '../types'
 
 const list = atom({ plugin: 'live-checklist', key: 'list' } as const, null)
 const isOpen = atom({ plugin: 'live-checklist', key: 'isOpen' } as const, true)
 const meter = atom({ plugin: 'live-checklist', key: 'meter' } as const, { tokens: 0, model: '' } as Meter)
 const git = atom({ plugin: 'live-checklist', key: 'git' } as const, null as Git | null)
 const sync = atom({ plugin: 'live-checklist', key: 'sync' } as const, null as Sync | null)
+const progress = atom({ plugin: 'live-checklist', key: 'progress' } as const, null as Progress | null)
 const agentModels = atom({ plugin: 'live-checklist', key: 'agentModels' } as const, {} as AgentModels)
 const run = atom({ plugin: 'live-checklist', key: 'run' } as const, null as Entry | null)
 
@@ -159,6 +160,41 @@ const BUSY_W = 74
 const busy = (color: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${BUSY_W}" height="${LINE}" viewBox="0 0 ${BUSY_W} ${LINE}"><text x="0" y="${BASE}" font-family="'Test Tiempos Text', 'Tiempos Text', Tiempos, Georgia, serif" font-style="italic" font-size="14" fill="${color}">in progress</text></svg>`
 
+// With a progress file, the active step shows a pixel fill bar in place of 'in progress': a pixel hourglass whose
+// sand falls from the top bulb to the bottom (then it turns over), 21 blocks filled to the percentage, and the number.
+// 18 + 6 + 84 + 6 + 34 = 148 px.
+const BAR_W = 148
+const TRACK_X = 24
+const SEGS = 21
+const PX = 2
+const GLASS = ['#########', '.#.....#.', '..#...#..', '...#.#...', '....#....', '...#.#...', '..#...#..', '.#.....#.', '#########']
+// Sand rows [row, first col, last col] in the bulbs; the top drains from its surface down, the bottom fills from its floor up.
+const SAND_TOP: [number, number, number][] = [[1, 2, 6], [2, 3, 5], [3, 4, 4]]
+const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 3, 5], [5, 4, 4]]
+const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 1}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
+const fade = (on: boolean, t: number) =>
+  `<animate attributeName="opacity" calcMode="discrete" values="${on ? '1;0;0' : '0;1;1'}" keyTimes="0;${t};1" dur="4s" repeatCount="indefinite"/>`
+const bar = (p: Palette, pct: number) => {
+  const glass = GLASS.flatMap((row, r) => [...row].flatMap((ch, c) => (ch === '#' ? [px(c, r, 1, p.ring)] : []))).join('')
+  const top = SAND_TOP.map(([r, a, b], i) => `<g>${px(a, r, b - a + 1, p.accent)}${fade(true, 0.3 + i * 0.22)}</g>`).join('')
+  const bot = SAND_BOT.map(([r, a, b], i) => `<g opacity="0">${px(a, r, b - a + 1, p.accent)}${fade(false, 0.3 + i * 0.22)}</g>`).join('')
+  const stream = `<g>${px(4, 4, 1, p.accent)}<animate attributeName="opacity" calcMode="discrete" values="1;0;1;0;1;0" keyTimes="0;0.15;0.3;0.45;0.6;0.78" dur="4s" repeatCount="indefinite"/></g>`
+  const turn = `<animateTransform attributeName="transform" type="rotate" calcMode="discrete" values="0 9 10;90 9 10;180 9 10" keyTimes="0;0.88;0.94" dur="4s" repeatCount="indefinite"/>`
+  const lit = Math.min(SEGS, Math.max(pct > 0 ? 1 : 0, Math.round((SEGS * pct) / 100)))
+  const blocks = Array.from({ length: SEGS }, (_, i) => {
+    const x = TRACK_X + i * 4
+    return `<rect x="${x}" y="7" width="3" height="6" fill="${i < lit ? p.accent : p.fill}"${i < lit ? '' : ' fill-opacity="0.55"'}/>`
+  }).join('')
+  const next = lit < SEGS
+    ? `<rect x="${TRACK_X + lit * 4}" y="7" width="3" height="6" fill="${p.accent}" opacity="0"><animate attributeName="opacity" calcMode="discrete" values="0;1" keyTimes="0;0.5" dur="1s" repeatCount="indefinite"/></rect>`
+    : ''
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_W}" height="${LINE}" viewBox="0 0 ${BAR_W} ${LINE}" shape-rendering="crispEdges">` +
+    `<g>${glass}${top}${bot}${stream}${turn}</g>${blocks}${next}` +
+    `<text x="${TRACK_X + SEGS * 4 + 6}" y="${BASE - 1}" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="12" fill="${p.grey}">${pct}%</text></svg>`
+  )
+}
+
 const ALT: Record<Status, string> = { done: 'Done', active: 'In progress', pending: 'Not started', wait: 'Waiting on you' }
 const TEXT_MARK: Record<Status, string> = { done: '✓', active: '◌', pending: '○', wait: '○' }
 
@@ -210,6 +246,30 @@ async function refreshSync($: EngineInterface) {
     if (/^\d+$/.test(a) && /^\d+$/.test(b)) s = { pushed: Number(a), failed: Number(b), lastFailed: c === 'fail' }
   }
   await update($, sync, () => s)
+}
+
+// The progress file: a long job writes "<done> <total>" to ~/.claude/progress.count. Checked with
+// the sync counter; ignored once it is 15 minutes old, so a finished job's number never lingers.
+let progPath = ''
+let progSeen = ''
+async function refreshProgress($: EngineInterface) {
+  if (!progPath) {
+    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+    if (!home) return
+    progPath = `${home}/.claude/progress.count`
+  }
+  const st = await $.fs.stat(progPath).catch(() => undefined)
+  let p: Progress | null = null
+  if (st && (await $.clock.now()) - st.mtimeMs <= 15 * 60_000) {
+    const [a = '', b = ''] = String(await $.fs.read(progPath)).trim().split(/\s+/)
+    const done = Number(a)
+    const total = Number(b)
+    if (/^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
+  }
+  const key = p ? `${p.done}/${p.total}` : ''
+  if (key === progSeen) return
+  progSeen = key
+  await update($, progress, () => p)
 }
 
 // Build and store the band's list from a set call. Each step keeps its model, fix and
@@ -640,7 +700,12 @@ export const register: Register = (on, options) => {
     // A new session may have a new HOME, and must read the counter even if the file is unchanged.
     syncPath = ''
     syncSeen = -1
-    const checkSync = () => void refreshSync($).catch(() => undefined)
+    progPath = ''
+    progSeen = ''
+    const checkSync = () => {
+      void refreshSync($).catch(() => undefined)
+      void refreshProgress($).catch(() => undefined)
+    }
     checkSync()
     syncTimer?.cancel()
     syncTimer = $.clock.every(4000, checkSync)
@@ -780,6 +845,8 @@ export const register: Register = (on, options) => {
     const sessionModel = m?.model ? shortModel(m.model) : ''
     const g = await read($, git)
     const s = await read($, sync)
+    const prog = await read($, progress)
+    const progPct = prog ? Math.round((prog.done / prog.total) * 100) : undefined
     // Context gauge: grey, amber from 75%, red from 85% (auto-compact is near).
     const usage = await $.session.usage().catch(() => undefined)
     // Rounded first, so the colour matches the number shown; not a number, no gauge.
@@ -842,8 +909,14 @@ export const register: Register = (on, options) => {
             {i.text}
           </Text>
           {isNow ? (
-            graphic ? (
+            graphic && progPct !== undefined ? (
+              <Svg key="w" source={bar(P, progPct)} alt={`${progPct}% done`} width={BAR_W} height={LINE} isInteractive />
+            ) : graphic ? (
               <Svg key="w" source={busy(P.grey)} alt="in progress" width={BUSY_W} height={LINE} />
+            ) : progPct !== undefined ? (
+              <Text key="w" color={P.grey} tabular>
+                {`${progPct}%`}
+              </Text>
             ) : (
               <Text key="w" color={P.grey} italic>
                 in progress

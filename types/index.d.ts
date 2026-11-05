@@ -61,6 +61,8 @@ export type Meter = { tokens: number; model: string }
 export type Git = { label: string; tone: 'alert' | 'ok' | 'quiet' }
 // The auto-sync tally from ~/.claude/autosync.count: pushes that went up, ones that failed, and whether the last one failed.
 export type Sync = { pushed: number; failed: number; lastFailed: boolean }
+// A long job's progress from ~/.claude/progress.count ("<done> <total>"): shown as a fill bar on the active step.
+export type Progress = { done: number; total: number }
 // The model each subagent of this session runs on, by agent id, noted when it spawns.
 export type AgentModels = Record<string, string>
 
@@ -72,6 +74,7 @@ declare module 'claude-code' {
       meter: Meter
       git: Git | null
       sync: Sync | null
+      progress: Progress | null
       agentModels: AgentModels
       run: Entry | null
     }
