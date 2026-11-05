@@ -404,22 +404,22 @@ test('the sync counter follows the file as it changes', async ($, on) => {
 })
 
 // ---- Progress bar on the active step ----------------------------------------------------------
-// ~/.claude/progress.count holds "<done> <total>". The bar covers the whole task and sits on the active row only.
+// ~/.claude/progress.count holds "<done> <total>". The bar replaces 'in progress' on the active row only.
 
 const FRESH = 1_000_000
-// Whole-task bar: (finished steps + the running step's share from the file) / all steps. Here 1 of 3 steps is done.
-const PROGRESS_CASES: { name: string; text: string | null; mtime?: number; pct: number }[] = [
-  { name: 'missing file', text: null, pct: 33 },
+// The running step's own bar, from the file; without a usable file the step reads 'in progress'.
+const PROGRESS_CASES: { name: string; text: string | null; mtime?: number; pct: number | null }[] = [
+  { name: 'missing file', text: null, pct: null },
   { name: 'half done', text: '5 10', pct: 50 },
   { name: 'padding and newline', text: '  1 4
-', pct: 42 },
-  { name: 'finished', text: '280 280', pct: 67 },
-  { name: 'over the total is capped', text: '12 10', pct: 67 },
-  { name: 'zero total', text: '3 0', pct: 33 },
-  { name: 'garbage', text: 'hello world', pct: 33 },
-  { name: 'one number', text: '5', pct: 33 },
-  { name: 'negative', text: '-2 10', pct: 33 },
-  { name: 'older than 15 minutes', text: '5 10', mtime: FRESH - 16 * MIN, pct: 33 },
+', pct: 25 },
+  { name: 'finished', text: '280 280', pct: 100 },
+  { name: 'over the total is capped', text: '12 10', pct: 100 },
+  { name: 'zero total', text: '3 0', pct: null },
+  { name: 'garbage', text: 'hello world', pct: null },
+  { name: 'one number', text: '5', pct: null },
+  { name: 'negative', text: '-2 10', pct: null },
+  { name: 'older than 15 minutes', text: '5 10', mtime: FRESH - 16 * MIN, pct: null },
 ]
 
 for (const c of PROGRESS_CASES) {
@@ -427,11 +427,15 @@ for (const c of PROGRESS_CASES) {
     const { set, draw } = await boot($, on, { progress: c.text === null ? null : { text: c.text, mtime: c.mtime ?? FRESH } })
     await set({ title: 'T', items: [step('a', 'done'), step('b', 'active'), step('c', 'pending')] })
     const d = await draw()
-    expect(d.svgs).toContain(`${c.pct}% done`)
-    expect(d.svgs).not.toContain('in progress')
-    // Only the active row gets it, and the ring stays.
-    expect(d.svgs.filter(s => s.endsWith('% done'))).toHaveLength(1)
-    expect(d.svgs).toContain('In progress')
+    if (c.pct === null) {
+      expect(d.svgs).toContain('in progress')
+      expect(d.svgs.some(s => s.endsWith('% done'))).toBe(false)
+    } else {
+      expect(d.svgs).toContain(`${c.pct}% done`)
+      expect(d.svgs).not.toContain('in progress')
+      expect(d.svgs.filter(s => s.endsWith('% done'))).toHaveLength(1)
+      expect(d.svgs).toContain('In progress')
+    }
   })
 }
 
@@ -443,10 +447,10 @@ test('the terminal shows the percentage as text', async ($, on) => {
   expect(d.all).not.toContain('in progress')
 })
 
-test('the terminal shows the step share without a progress file', async ($, on) => {
+test('the terminal keeps the old words without a progress file', async ($, on) => {
   const { set, draw } = await boot($, on)
-  await set({ title: 'T', items: [step('a', 'done'), step('b', 'active')] })
-  expect((await draw('terminal')).all).toContain('50%')
+  await set({ title: 'T', items: [step('a', 'active')] })
+  expect((await draw('terminal')).all).toContain('in progress')
 })
 
 test('the bar follows the file as it changes, and goes when the file does', async ($, on) => {
@@ -459,11 +463,11 @@ test('the bar follows the file as it changes, and goes when the file does', asyn
   expect((await draw()).svgs).toContain('50% done')
   world.progress = null
   await clock.advance(4000)
-  expect((await draw()).svgs).toContain('0% done')
+  expect((await draw()).svgs).toContain('in progress')
 })
 
 test('a finished task shows a full bar for a few seconds, then it goes', async ($, on) => {
-  const { set, draw, clock } = await boot($, on)
+  const { set, draw, clock } = await boot($, on, { progress: { text: '9 10', mtime: FRESH } })
   await set({ title: 'T', items: [step('a', 'done'), step('b', 'active')] })
   await set({ title: 'T', items: [step('a', 'done'), step('b', 'done')] })
   expect((await draw()).svgs).toContain('100% done')
@@ -474,7 +478,7 @@ test('a finished task shows a full bar for a few seconds, then it goes', async (
 test("a progress file for another project is ignored", async ($, on) => {
   const { set, draw } = await boot($, on, { progress: { text: '9 10 C:\Users\abhis\Downloads\Locomotive', mtime: FRESH } })
   await set({ title: 'T', items: [step('a', 'active')] })
-  expect((await draw()).svgs).toContain('0% done')
+  expect((await draw()).svgs).toContain('in progress')
 })
 
 test('a finished step shows no bar', async ($, on) => {
@@ -548,7 +552,7 @@ test('every surface draws the band; the terminal uses text marks', async ($, on)
     expect(d.all[0]).toBe('T')
     for (const t of ['a', 'b', 'c', 'd']) expect(d.all).toContain(t)
     if (surface === 'terminal') {
-      for (const mark of ['✓', '◌', '○', '25%']) expect(d.all).toContain(mark)
+      for (const mark of ['✓', '◌', '○', 'in progress']) expect(d.all).toContain(mark)
     }
   }
 })
@@ -565,7 +569,7 @@ test('a survey or an empty list hands the band back to the engine', async ($, on
 // ---- Never a copy of the app's task list ----------------------------------------------------
 
 // Each row's state, read from its glyph: Done, In progress, Not started.
-const states = (svgs: string[]) => svgs.filter(a => !a.endsWith('% done'))
+const states = (svgs: string[]) => svgs.filter(a => a !== 'in progress' && !a.endsWith('% done'))
 const P = (content: string, status: string) => ({ content, status })
 
 test("the app's task list never reaches the band", async ($, on) => {

@@ -153,9 +153,16 @@ const glyphs = (p: Palette): Record<Status, string> => {
 }
 const GLYPHS = { light: glyphs(PALETTES.light), dark: glyphs(PALETTES.dark), mid: glyphs(PALETTES.mid) }
 
-// The active step shows a pixel fill bar for the whole task (finished steps plus the running step's share): a pixel
+// With a progress file, the active step shows a pixel fill bar for that step in place of 'in progress': a pixel
 // hourglass whose sand falls from the top bulb to the bottom (then it turns over), 21 blocks, and the number.
 // 9 + 6 + 84 + 6 + 34 = 139 px.
+// 'in progress' beside the active step, in the app's serif (Tiempos Text italic, else Georgia).
+// Text has no font setting, so it is a small SVG: 14 px, 5.03 em wide in Tiempos (Georgia 5.07),
+// on the same baseline as the body text beside it.
+const BUSY_W = 74
+const busy = (color: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${BUSY_W}" height="${LINE}" viewBox="0 0 ${BUSY_W} ${LINE}"><text x="0" y="${BASE}" font-family="'Test Tiempos Text', 'Tiempos Text', Tiempos, Georgia, serif" font-style="italic" font-size="14" fill="${color}">in progress</text></svg>`
+
 const BAR_W = 139
 const FULL_MS = 5000 // how long a finished task keeps its full bar
 const TRACK_X = 15
@@ -885,11 +892,11 @@ export const register: Register = (on, options) => {
 
     const done = l.items.filter(i => i.status === 'done')
     const rest = l.items.filter(i => i.status !== 'done')
-    // Whole-task bar: finished steps plus the running step's share (from the job file, if fresh).
-    const stepFrac = prog ? prog.done / prog.total : 0
-    const progPct = Math.min(100, Math.round(((done.length + stepFrac) / Math.max(1, l.items.length)) * 100))
-    // A task that has just finished keeps a full bar on its last step for a few seconds, then it goes.
-    const justDone = l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
+    // The running step's own progress, from the job file (fresh and for this project); none without one.
+    const progPct = prog ? Math.round((prog.done / prog.total) * 100) : undefined
+    // A task with a bar that has just finished keeps it full on its last step for a few seconds, then it goes.
+    const justDone =
+      progPct !== undefined && l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
     const lastItem = l.items[l.items.length - 1]
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
@@ -927,11 +934,17 @@ export const register: Register = (on, options) => {
             {i.text}
           </Text>
           {isNow || (justDone && i === lastItem) ? (
-            graphic ? (
+            graphic && progPct !== undefined ? (
               <Svg key="w" source={bar(P, justDone ? 100 : progPct)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
-            ) : (
+            ) : graphic ? (
+              <Svg key="w" source={busy(P.grey)} alt="in progress" width={BUSY_W} height={LINE} />
+            ) : progPct !== undefined ? (
               <Text key="w" color={P.grey} tabular>
                 {`${justDone ? 100 : progPct}%`}
+              </Text>
+            ) : (
+              <Text key="w" color={P.grey} italic>
+                in progress
               </Text>
             )
           ) : null}
