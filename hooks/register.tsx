@@ -261,7 +261,7 @@ async function refreshProgress($: EngineInterface) {
     const done = Number(a)
     const total = Number(b)
     // An optional third field names the project folder the job belongs to; other projects' sessions ignore it.
-    const norm = (x: string) => x.replace(/\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const norm = (x: string) => x.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
     const mine = !where || (!!sessionCwd && norm(sessionCwd).startsWith(norm(where)))
     if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
   }
