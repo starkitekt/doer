@@ -589,6 +589,15 @@ test("wrap_up finishes the band's own running step, with its time", async ($, on
   expect(d.all.some(t => t.endsWith('/ 2m'))).toBe(true)
 })
 
+test('wrap_up leaves the step running while a job is still writing the progress file', async ($, on) => {
+  const { set, wrap, draw } = await boot($, on, { progress: { text: '5 10', mtime: FRESH } })
+  await set({ title: 'T', items: [step('a', 'active')] })
+  await wrap()
+  const d = await draw()
+  expect(states(d.svgs)).toEqual(['In progress'])
+  expect(d.svgs).toContain('50% done')
+})
+
 // ---- Wording --------------------------------------------------------------------------------
 
 test('only a prompt that can draw the band is told what it is for, once', async ($, on) => {

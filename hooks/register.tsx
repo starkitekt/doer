@@ -590,9 +590,9 @@ async function begin($: EngineInterface, text: string) {
   }
   await update($, run, () => entry)
   persist($, entry)
-  // A step Claude is already running (a prompt sent mid-turn) keeps its own list.
+  // A task Claude has not finished (a step running or still to do) keeps its own list across prompts.
   const prev = await read($, list)
-  if (!(prev?.source === 'set' && prev.items.some(i => i.status === 'active'))) {
+  if (!(prev?.source === 'set' && prev.items.some(i => i.status !== 'done'))) {
     await applyList($, titleOf(text), [{ text: 'Your request is still open', status: 'active' }], 'auto')
   }
   void judge($, text).then(async tier => {
@@ -814,6 +814,9 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     try {
       const prev = await read($, list)
+      // A job still writing the progress file keeps its row running across turns, so the bar stays until it ends.
+      const job = await read($, progress)
+      if (job && job.done < job.total) return r
       if (prev?.items.some(i => i.status === 'active'))
         await applyList($, prev.title, prev.items.map(i => ({ ...i, status: i.status === 'active' ? 'done' : i.status })), 'set')
     } catch {
