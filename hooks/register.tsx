@@ -155,17 +155,17 @@ const GLYPHS = { light: glyphs(PALETTES.light), dark: glyphs(PALETTES.dark), mid
 
 // The active step shows a pixel fill bar for the whole task (finished steps plus the running step's share): a pixel
 // hourglass whose sand falls from the top bulb to the bottom (then it turns over), 21 blocks, and the number.
-// 18 + 6 + 84 + 6 + 34 = 148 px.
-const BAR_W = 148
+// 9 + 6 + 84 + 6 + 34 = 139 px.
+const BAR_W = 139
 const FULL_MS = 5000 // how long a finished task keeps its full bar
-const TRACK_X = 24
+const TRACK_X = 15
 const SEGS = 21
-const PX = 2
+const PX = 1 // 9 x 9 px, the same size as the status circle (10 px)
 const GLASS = ['#########', '.#.....#.', '..#...#..', '...#.#...', '....#....', '...#.#...', '..#...#..', '.#.....#.', '#########']
 // Sand rows [row, first col, last col] in the bulbs; the top drains from its surface down, the bottom fills from its floor up.
 const SAND_TOP: [number, number, number][] = [[1, 2, 6], [2, 3, 5], [3, 4, 4]]
 const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 3, 5], [5, 4, 4]]
-const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 1}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
+const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 6}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
 const fade = (on: boolean, t: number) =>
   `<animate attributeName="opacity" calcMode="discrete" values="${on ? '1;0;0' : '0;1;1'}" keyTimes="0;${t};1" dur="4s" repeatCount="indefinite"/>`
 const bar = (p: Palette, pct: number) => {
@@ -173,14 +173,14 @@ const bar = (p: Palette, pct: number) => {
   const top = SAND_TOP.map(([r, a, b], i) => `<g>${px(a, r, b - a + 1, p.accent)}${fade(true, 0.3 + i * 0.22)}</g>`).join('')
   const bot = SAND_BOT.map(([r, a, b], i) => `<g opacity="0">${px(a, r, b - a + 1, p.accent)}${fade(false, 0.3 + i * 0.22)}</g>`).join('')
   const stream = `<g>${px(4, 4, 1, p.accent)}<animate attributeName="opacity" calcMode="discrete" values="1;0;1;0;1;0" keyTimes="0;0.15;0.3;0.45;0.6;0.78" dur="4s" repeatCount="indefinite"/></g>`
-  const turn = `<animateTransform attributeName="transform" type="rotate" calcMode="discrete" values="0 9 10;90 9 10;180 9 10" keyTimes="0;0.88;0.94" dur="4s" repeatCount="indefinite"/>`
+  const turn = `<animateTransform attributeName="transform" type="rotate" calcMode="discrete" values="0 4.5 10.5;90 4.5 10.5;180 4.5 10.5" keyTimes="0;0.88;0.94" dur="4s" repeatCount="indefinite"/>`
   const lit = Math.min(SEGS, Math.max(pct > 0 ? 1 : 0, Math.round((SEGS * pct) / 100)))
   const blocks = Array.from({ length: SEGS }, (_, i) => {
     const x = TRACK_X + i * 4
-    return `<rect x="${x}" y="7" width="3" height="6" fill="${i < lit ? p.accent : p.fill}"${i < lit ? '' : ' fill-opacity="0.55"'}/>`
+    return `<rect x="${x}" y="8" width="3" height="6" fill="${i < lit ? p.accent : p.fill}"${i < lit ? '' : ' fill-opacity="0.55"'}/>`
   }).join('')
   const next = lit < SEGS
-    ? `<rect x="${TRACK_X + lit * 4}" y="7" width="3" height="6" fill="${p.accent}" opacity="0"><animate attributeName="opacity" calcMode="discrete" values="0;1" keyTimes="0;0.5" dur="1s" repeatCount="indefinite"/></rect>`
+    ? `<rect x="${TRACK_X + lit * 4}" y="8" width="3" height="6" fill="${p.accent}" opacity="0"><animate attributeName="opacity" calcMode="discrete" values="0;1" keyTimes="0;0.5" dur="1s" repeatCount="indefinite"/></rect>`
     : ''
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_W}" height="${LINE}" viewBox="0 0 ${BAR_W} ${LINE}" shape-rendering="crispEdges">` +
