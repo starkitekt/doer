@@ -245,6 +245,7 @@ async function refreshSync($: EngineInterface) {
 // The progress file: a long job writes "<done> <total>" to ~/.claude/progress.count. Checked with
 // the sync counter; ignored once it is 15 minutes old, so a finished job's number never lingers.
 let progPath = ''
+let sessionCwd = ''
 let progSeen = ''
 async function refreshProgress($: EngineInterface) {
   if (!progPath) {
@@ -255,10 +256,14 @@ async function refreshProgress($: EngineInterface) {
   const st = await $.fs.stat(progPath).catch(() => undefined)
   let p: Progress | null = null
   if (st && (await $.clock.now()) - st.mtimeMs <= 15 * 60_000) {
-    const [a = '', b = ''] = String(await $.fs.read(progPath)).trim().split(/\s+/)
+    const m = /^\s*(\S+)\s+(\S+)(?:\s+(.+?))?\s*$/.exec(String(await $.fs.read(progPath)).trim())
+    const [, a = '', b = '', where = ''] = m ?? []
     const done = Number(a)
     const total = Number(b)
-    if (/^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
+    // An optional third field names the project folder the job belongs to; other projects' sessions ignore it.
+    const norm = (x: string) => x.replace(/\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const mine = !where || (!!sessionCwd && norm(sessionCwd).startsWith(norm(where)))
+    if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
   }
   const key = p ? `${p.done}/${p.total}` : ''
   if (key === progSeen) return
@@ -700,6 +705,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
+    sessionCwd = String((e as { cwd?: unknown }).cwd ?? '')
     refreshGit($)
     // A new session may have a new HOME, and must read the counter even if the file is unchanged.
     syncPath = ''

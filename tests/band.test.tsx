@@ -471,6 +471,12 @@ test('a finished task shows a full bar for a few seconds, then it goes', async (
   expect((await draw()).svgs.some(s => s.endsWith('% done'))).toBe(false)
 })
 
+test("a progress file for another project is ignored", async ($, on) => {
+  const { set, draw } = await boot($, on, { progress: { text: '9 10 C:\Users\abhis\Downloads\Locomotive', mtime: FRESH } })
+  await set({ title: 'T', items: [step('a', 'active')] })
+  expect((await draw()).svgs).toContain('0% done')
+})
+
 test('a finished step shows no bar', async ($, on) => {
   const { set, draw } = await boot($, on, { progress: { text: '5 10', mtime: FRESH } })
   await set({ title: 'T', items: [step('a', 'done'), step('b', 'pending')] })
