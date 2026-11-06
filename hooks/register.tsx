@@ -71,10 +71,10 @@ const shortModel = (m: string) => {
   return m.trim().slice(0, 8)
 }
 const fmtTok = (n: number) =>
-  n < 1000 ? String(n) : n < 1e6 ? `${+(n / 1e3).toFixed(1)}k` : `${+(n / 1e6).toFixed(1)}M`
+  n < 1000 ? String(n) : n < 999_950 ? `${+(n / 1e3).toFixed(1)}k` : `${+(n / 1e6).toFixed(1)}M`
 const fmtTime = (ms: number) => {
   const m = ms / 60000
-  return m < 1 ? '<1m' : m < 60 ? `${Math.round(m)}m` : `${+(m / 60).toFixed(1)}h`
+  return m < 1 ? '<1m' : m < 59.5 ? `${Math.round(m)}m` : `${+(m / 60).toFixed(1)}h`
 }
 const stats = (i: Item) =>
   i.status === 'done' && i.tokens !== undefined && i.ms !== undefined ? `${fmtTok(i.tokens)} T / ${fmtTime(i.ms)}` : ''
@@ -233,7 +233,7 @@ let syncSeen = -1
 let syncTimer: { cancel: () => void } | undefined
 async function refreshSync($: EngineInterface) {
   if (!syncPath) {
-    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
     if (!home) return
     syncPath = `${home}/.claude/autosync.count`
   }
@@ -264,7 +264,7 @@ async function refreshProgress($: EngineInterface) {
   // No home folder (a cloud or sandboxed session): no job file, but the estimate below still works.
   if (!progPath) {
     const home = await Promise.resolve($.env.get('HOME'))
-      .then(h => h ?? $.env.get('USERPROFILE'))
+      .then(h => h || $.env.get('USERPROFILE'))
       .catch(() => undefined)
     if (home) progPath = `${home}/.claude/progress.count`
   }
@@ -280,7 +280,7 @@ async function refreshProgress($: EngineInterface) {
     const norm = (x: string) => x.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
     const mine = !where || (!!sessionCwd && (norm(sessionCwd) === norm(where) || norm(sessionCwd).startsWith(norm(where) + '/')))
     // A finished job (done == total) only shows for FULL_MS, so it never sits on the next prompt's step.
-    if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0 && (done < total || age <= FULL_MS)) p = { done: Math.min(done, total), total }
+    if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0 && done <= total && (done < total || age <= FULL_MS)) p = { done: Math.min(done, total), total }
   }
   // No job file: the running step gets an estimate that eases toward 95% over its first few minutes.
   if (!p) {
@@ -777,7 +777,7 @@ export const register: Register = (on, options) => {
         },
         required: ['items'],
       },
-    })
+    }).catch(() => undefined)
     return next(e)
   })
 

@@ -1,6 +1,6 @@
 {
   "name": "live-checklist",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "A problem-and-fix explainer above the prompt that Claude keeps up to date",
   "author": { "name": "starkitekt", "url": "https://github.com/starkitekt" },
   "homepage": "https://github.com/starkitekt/doer",
