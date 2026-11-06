@@ -254,6 +254,12 @@ async function refreshSync($: EngineInterface) {
 let progPath = ''
 let sessionCwd = ''
 let progSeen = ''
+let curKey = ''
+let curSince = 0
+// The step being worked on: the one marked running, else, while a prompt is still running, the first not yet done
+// (Claude often leaves its list as it was while it works). None when idle or everything is done.
+const currentItem = (l: List | null, live: boolean): Item | undefined =>
+  l?.items.find(i => i.status === 'active') ?? (live ? l?.items.find(i => i.status !== 'done') : undefined)
 async function refreshProgress($: EngineInterface) {
   if (!progPath) {
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
@@ -276,8 +282,15 @@ async function refreshProgress($: EngineInterface) {
   if (!p) {
     const l = await read($, list)
     const now = await $.clock.now()
-    const act = l?.items.find(i => i.status === 'active' && i.startedAt !== undefined)
-    if (act?.startedAt !== undefined) p = { done: Math.round(95 * (1 - Math.exp(-(now - act.startedAt) / 90_000))), total: 100, est: true }
+    const act = currentItem(l, (await read($, run)) !== null)
+    if (act) {
+      const key = `${l?.title}|${act.text}`
+      if (key !== curKey) {
+        curKey = key
+        curSince = act.startedAt ?? now
+      }
+      p = { done: Math.round(95 * (1 - Math.exp(-(now - curSince) / 90_000))), total: 100, est: true }
+    } else curKey = ''
   }
   const key = p ? `${p.done}/${p.total}${p.est ? '~' : ''}` : ''
   if (key === progSeen) return
@@ -906,8 +919,9 @@ export const register: Register = (on, options) => {
       progPct !== undefined && l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
     const lastItem = l.items[l.items.length - 1]
     // A live job with no step marked running still belongs to the first step left open.
-    const jobRunning = progPct !== undefined && progPct < 100 && !l.items.some(i => i.status === 'active')
-    const jobItem = jobRunning ? rest[0] : undefined
+    const liveRun = (await read($, run)) !== null
+    const jobItem = currentItem(l, liveRun && progPct !== undefined)
+    const isCur = (i: Item) => i === jobItem && i.status !== 'active'
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -935,7 +949,7 @@ export const register: Register = (on, options) => {
     // glyph, task text, then tokens / time against the right edge once the step is done.
     const row = (i: Item, k: string) => {
       const isDone = i.status === 'done'
-      const isNow = i.status === 'active'
+      const isNow = i.status === 'active' || isCur(i)
       const took = stats(i)
       const why = explain(i)
       const line = (
@@ -968,7 +982,7 @@ export const register: Register = (on, options) => {
               {i.model ?? sessionModel}
             </Text>
           </Box>
-          {glyph(i.status, k + 'g')}
+          {glyph(isNow ? 'active' : i.status, k + 'g')}
           <Box key={k + 'b'} flexGrow={1} flexShrink={1} flexDirection="column">
             {line}
             {why ? (
