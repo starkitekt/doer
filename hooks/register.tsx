@@ -240,13 +240,13 @@ async function refreshSync($: EngineInterface) {
   const st = await $.fs.stat(syncPath).catch(() => undefined)
   const mtime = st?.mtimeMs ?? 0
   if (mtime === syncSeen) return
-  syncSeen = mtime
   let s: Sync | null = null
   if (st) {
     const [a = '', b = '', c] = String(await $.fs.read(syncPath)).trim().split(/\s+/)
     if (/^\d+$/.test(a) && /^\d+$/.test(b)) s = { pushed: Number(a), failed: Number(b), lastFailed: c === 'fail' }
   }
   await update($, sync, () => s)
+  syncSeen = mtime
 }
 
 // The progress file: a long job writes "<done> <total>" to ~/.claude/progress.count. Checked with
@@ -270,15 +270,17 @@ async function refreshProgress($: EngineInterface) {
   }
   const st = progPath ? await $.fs.stat(progPath).catch(() => undefined) : undefined
   let p: Progress | null = null
-  if (st && (await $.clock.now()) - st.mtimeMs <= 15 * 60_000) {
+  const age = st ? (await $.clock.now()) - st.mtimeMs : Infinity
+  if (st && age <= 15 * 60_000) {
     const m = /^\s*(\S+)\s+(\S+)(?:\s+(.+?))?\s*$/.exec(String(await $.fs.read(progPath)).trim())
     const [, a = '', b = '', where = ''] = m ?? []
     const done = Number(a)
     const total = Number(b)
     // An optional third field names the project folder the job belongs to; other projects' sessions ignore it.
     const norm = (x: string) => x.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
-    const mine = !where || (!!sessionCwd && norm(sessionCwd).startsWith(norm(where)))
-    if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
+    const mine = !where || (!!sessionCwd && (norm(sessionCwd) === norm(where) || norm(sessionCwd).startsWith(norm(where) + '/')))
+    // A finished job (done == total) only shows for FULL_MS, so it never sits on the next prompt's step.
+    if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0 && (done < total || age <= FULL_MS)) p = { done: Math.min(done, total), total }
   }
   // No job file: the running step gets an estimate that eases toward 95% over its first few minutes.
   if (!p) {
@@ -330,7 +332,7 @@ async function applyList($: EngineInterface, rawTitle: unknown, raw: unknown[], 
   const items: Item[] = clean.map((i, n) => {
       const text = i.text
       const status: Status = (STATUSES as unknown[]).includes(i.status) ? (i.status as Status) : 'pending'
-      const was = claim(text, n)
+      const was = source === 'auto' ? undefined : claim(text, n)
       const asked = typeof i.model === 'string' && i.model.trim() ? shortModel(i.model) : undefined
       const item: Item = { text, status, model: asked ?? was?.model ?? (m.model ? shortModel(m.model) : undefined) }
       const fix = oneLine(i.fix, 160) || (was?.text === text ? was.fix : undefined)
@@ -417,11 +419,13 @@ const readConfig = (o: Readonly<Record<string, unknown>> | undefined): Config =>
 const isEntry = (v: unknown): v is Entry => typeof v === 'object' && v !== null && typeof (v as Entry).id === 'string' && typeof (v as Entry).outcome === 'string'
 
 // The log, oldest first. Whatever the store holds is checked, so a bad file never breaks routing.
-async function readLog($: EngineInterface): Promise<Entry[]> {
+async function readLog($: EngineInterface, strict = false): Promise<Entry[]> {
   try {
     const v = await $.store.get(LOG_KEY)
     return Array.isArray(v) ? v.filter(isEntry) : []
-  } catch {
+  } catch (err) {
+    // Before a write, a failed read must stop the write, or the history would be replaced by one entry.
+    if (strict) throw err
     return []
   }
 }
@@ -431,7 +435,7 @@ let logChain: Promise<unknown> = Promise.resolve()
 function persist($: EngineInterface, entry: Entry) {
   logChain = logChain
     .then(async () => {
-      const log = await readLog($)
+      const log = await readLog($, true)
       const at = log.findIndex(x => x.id === entry.id)
       if (at >= 0) log[at] = entry
       else log.push(entry)
@@ -455,7 +459,7 @@ function escalate(tier: Tier, kind: string, log: Entry[]): Tier {
   const ofKind = scored.filter(s => s.kind === kind)
   let seen = rate((ofKind.length >= LEARN_MIN ? ofKind : scored).map(s => failed(s.outcome)))
   if (seen.length < LEARN_MIN)
-    seen = rate(log.filter(x => x.tier === tier && x.outcome !== 'running' && (x.spawns ?? []).every(s => !s.outcome)).map(x => x.outcome !== 'ok'))
+    seen = rate(log.filter(x => x.tier === tier && x.outcome !== 'running' && x.outcome !== 'aborted' && (x.spawns ?? []).every(s => !s.outcome)).map(x => x.outcome !== 'ok'))
   return seen.length >= LEARN_MIN && seen.filter(Boolean).length / seen.length >= 0.5 ? up : tier
 }
 
@@ -479,7 +483,7 @@ async function settle($: EngineInterface, agentId: string, patch: Partial<Spawn>
   }
   logChain = logChain
     .then(async () => {
-      const log = await readLog($)
+      const log = await readLog($, true)
       const at = log.findIndex(x => Array.isArray(x.spawns) && x.spawns.some(s => s.agentId === agentId))
       if (at < 0) return
       log[at] = { ...log[at], spawns: log[at].spawns.map(s => (s.agentId === agentId ? { ...s, ...patch } : s)) }
@@ -798,9 +802,15 @@ export const register: Register = (on, options) => {
       if (d.model) input = { ...e, model: d.model }
       if (cur) {
         const spawn: Spawn = { description: oneLine(e.description, 80), tier: d.tier, model: d.model ?? (e.model || e.parentModel), why: d.why, kind: e.subagentType }
-        const upd: Entry = { ...cur, spawns: [...cur.spawns, spawn].slice(-20), tier: cur.tier && TIERS.indexOf(cur.tier) > TIERS.indexOf(d.tier) ? cur.tier : d.tier }
-        await update($, run, () => upd)
-        persist($, upd)
+        // Built from the entry as it is now (the route step above can take seconds), so parallel spawns and an
+        // ended prompt are never overwritten by a stale copy.
+        let saved: Entry | null = null
+        await update($, run, c => {
+          saved = c ? { ...c, spawns: [...c.spawns, spawn].slice(-20), tier: c.tier && TIERS.indexOf(c.tier) > TIERS.indexOf(d.tier) ? c.tier : d.tier } : c
+          return saved
+        })
+        const out = saved as Entry | null
+        if (out) persist($, out)
       }
     } catch {
       input = e
@@ -838,11 +848,15 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: SET_TOOL }, async ($, e) => {
-    const input = e as unknown as { title?: unknown; items?: unknown }
-    const next = await applyList($, input.title, Array.isArray(input.items) ? input.items : [], 'set')
-    const done = next ? next.items.filter(i => i.status === 'done').length : 0
-    return { result: next ? `Checklist shown: ${done}/${next.items.length} done.` : 'Checklist cleared.' }
-  }).catch(() => ({ result: 'Checklist could not be updated.' }))
+    try {
+      const input = e as unknown as { title?: unknown; items?: unknown }
+      const next = await applyList($, input.title, Array.isArray(input.items) ? input.items : [], 'set')
+      const done = next ? next.items.filter(i => i.status === 'done').length : 0
+      return { result: next ? `Checklist shown: ${done}/${next.items.length} done.` : 'Checklist cleared.' }
+    } catch {
+      return { result: 'Checklist could not be updated.' }
+    }
+  })
 
   // The turn's end (wrap_up) finishes the band's own running step. Nothing of the app's list is copied.
   on('tool.call', { tool: 'mcp__ccd_turn__wrap_up' }, async ($, e, next) => {
@@ -851,7 +865,7 @@ export const register: Register = (on, options) => {
       const prev = await read($, list)
       // A job still writing the progress file keeps its row running across turns, so the bar stays until it ends.
       const job = await read($, progress)
-      if (job && job.done < job.total) return r
+      if (job && !job.est && job.done < job.total) return r
       if (prev?.items.some(i => i.status === 'active'))
         await applyList($, prev.title, prev.items.map(i => ({ ...i, status: i.status === 'active' ? 'done' : i.status })), 'set')
     } catch {
@@ -960,11 +974,11 @@ export const register: Register = (on, options) => {
             {i.text}
           </Text>
           {isNow || i === jobItem || (justDone && i === lastItem) ? (
-            graphic && progPct !== undefined ? (
+            graphic && progPct !== undefined && (i === jobItem || (justDone && i === lastItem)) ? (
               <Svg key="w" source={bar(P, justDone ? 100 : progPct, !!prog?.est && !justDone)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
             ) : graphic ? (
               <Svg key="w" source={busy(P.grey)} alt="in progress" width={BUSY_W} height={LINE} />
-            ) : progPct !== undefined ? (
+            ) : progPct !== undefined && (i === jobItem || (justDone && i === lastItem)) ? (
               <Text key="w" color={P.grey} tabular>
                 {`${prog?.est && !justDone ? '~' : ''}${justDone ? 100 : progPct}%`}
               </Text>
