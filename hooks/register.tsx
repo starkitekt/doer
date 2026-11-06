@@ -261,12 +261,14 @@ let curSince = 0
 const currentItem = (l: List | null, live: boolean): Item | undefined =>
   l?.items.find(i => i.status === 'active') ?? (live ? l?.items.find(i => i.status !== 'done') : undefined)
 async function refreshProgress($: EngineInterface) {
+  // No home folder (a cloud or sandboxed session): no job file, but the estimate below still works.
   if (!progPath) {
-    const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
-    if (!home) return
-    progPath = `${home}/.claude/progress.count`
+    const home = await Promise.resolve($.env.get('HOME'))
+      .then(h => h ?? $.env.get('USERPROFILE'))
+      .catch(() => undefined)
+    if (home) progPath = `${home}/.claude/progress.count`
   }
-  const st = await $.fs.stat(progPath).catch(() => undefined)
+  const st = progPath ? await $.fs.stat(progPath).catch(() => undefined) : undefined
   let p: Progress | null = null
   if (st && (await $.clock.now()) - st.mtimeMs <= 15 * 60_000) {
     const m = /^\s*(\S+)\s+(\S+)(?:\s+(.+?))?\s*$/.exec(String(await $.fs.read(progPath)).trim())
