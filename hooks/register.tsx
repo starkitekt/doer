@@ -168,14 +168,14 @@ const FULL_MS = 5000 // how long a finished task keeps its full bar
 const TRACK_X = 15
 const SEGS = 21
 const PX = 1 // 9 x 9 px, the same size as the status circle (10 px)
-const GLASS = ['#########', '.#.....#.', '..#...#..', '...#.#...', '....#....', '...#.#...', '..#...#..', '.#.....#.', '#########']
+const GLASS = ['#########', '.#.....#.', '.#.....#.', '..##.##..', '....#....', '..##.##..', '.#.....#.', '.#.....#.', '#########']
 // Sand rows [row, first col, last col] in the bulbs; the top drains from its surface down, the bottom fills from its floor up.
-const SAND_TOP: [number, number, number][] = [[1, 2, 6], [2, 3, 5], [3, 4, 4]]
-const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 3, 5], [5, 4, 4]]
+const SAND_TOP: [number, number, number][] = [[1, 2, 6], [2, 2, 6], [3, 4, 4]]
+const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 2, 6], [5, 4, 4]]
 const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 6}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
 const fade = (on: boolean, t: number) =>
   `<animate attributeName="opacity" calcMode="discrete" values="${on ? '1;0;0' : '0;1;1'}" keyTimes="0;${t};1" dur="4s" repeatCount="indefinite"/>`
-const bar = (p: Palette, pct: number) => {
+const bar = (p: Palette, pct: number, est = false) => {
   const glass = GLASS.flatMap((row, r) => [...row].flatMap((ch, c) => (ch === '#' ? [px(c, r, 1, p.ring)] : []))).join('')
   const top = SAND_TOP.map(([r, a, b], i) => `<g>${px(a, r, b - a + 1, p.accent)}${fade(true, 0.3 + i * 0.22)}</g>`).join('')
   const bot = SAND_BOT.map(([r, a, b], i) => `<g opacity="0">${px(a, r, b - a + 1, p.accent)}${fade(false, 0.3 + i * 0.22)}</g>`).join('')
@@ -192,7 +192,7 @@ const bar = (p: Palette, pct: number) => {
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_W}" height="${LINE}" viewBox="0 0 ${BAR_W} ${LINE}" shape-rendering="crispEdges">` +
     `<g>${glass}${top}${bot}${stream}${turn}</g>${blocks}${next}` +
-    `<text x="${TRACK_X + SEGS * 4 + 6}" y="${BASE - 1}" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="12" fill="${p.grey}">${pct}%</text></svg>`
+    `<text x="${TRACK_X + SEGS * 4 + 6}" y="${BASE - 1}" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="12" fill="${p.grey}">${est ? '~' : ''}${pct}%</text></svg>`
   )
 }
 
@@ -272,7 +272,14 @@ async function refreshProgress($: EngineInterface) {
     const mine = !where || (!!sessionCwd && norm(sessionCwd).startsWith(norm(where)))
     if (mine && /^\d+$/.test(a) && /^\d+$/.test(b) && total > 0) p = { done: Math.min(done, total), total }
   }
-  const key = p ? `${p.done}/${p.total}` : ''
+  // No job file: the running step gets an estimate that eases toward 95% over its first few minutes.
+  if (!p) {
+    const l = await read($, list)
+    const now = await $.clock.now()
+    const act = l?.items.find(i => i.status === 'active' && i.startedAt !== undefined)
+    if (act?.startedAt !== undefined) p = { done: Math.round(95 * (1 - Math.exp(-(now - act.startedAt) / 90_000))), total: 100, est: true }
+  }
+  const key = p ? `${p.done}/${p.total}${p.est ? '~' : ''}` : ''
   if (key === progSeen) return
   progSeen = key
   await update($, progress, () => p)
@@ -938,12 +945,12 @@ export const register: Register = (on, options) => {
           </Text>
           {isNow || i === jobItem || (justDone && i === lastItem) ? (
             graphic && progPct !== undefined ? (
-              <Svg key="w" source={bar(P, justDone ? 100 : progPct)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
+              <Svg key="w" source={bar(P, justDone ? 100 : progPct, !!prog?.est && !justDone)} alt={`${justDone ? 100 : progPct}% done`} width={BAR_W} height={LINE} isInteractive />
             ) : graphic ? (
               <Svg key="w" source={busy(P.grey)} alt="in progress" width={BUSY_W} height={LINE} />
             ) : progPct !== undefined ? (
               <Text key="w" color={P.grey} tabular>
-                {`${justDone ? 100 : progPct}%`}
+                {`${prog?.est && !justDone ? '~' : ''}${justDone ? 100 : progPct}%`}
               </Text>
             ) : (
               <Text key="w" color={P.grey} italic>
