@@ -903,6 +903,12 @@ export const register: Register = (on, options) => {
     const g = await read($, git)
     const s = await read($, sync)
     const prog = await read($, progress)
+    // A task list the model has not touched since this prompt began is carried over from earlier work: say so, and
+    // do not run an estimate bar on it, so it never reads as live progress.
+    const runEntry = await read($, run)
+    const stale = !!runEntry && l.source === 'set' && l.at < runEntry.at
+    const staleMin = stale ? Math.floor(((await $.clock.now()) - l.at) / 60_000) : 0
+    const staleNote = `Not updated this turn${staleMin >= 1 ? `, last change ${staleMin}m ago` : ''}`
     // Context gauge: grey, amber from 75%, red from 85% (auto-compact is near).
     const usage = await $.session.usage().catch(() => undefined)
     // Rounded first, so the colour matches the number shown; not a number, no gauge.
@@ -930,18 +936,18 @@ export const register: Register = (on, options) => {
     const done = l.items.filter(i => i.status === 'done')
     const rest = l.items.filter(i => i.status !== 'done')
     // The running step's own progress, from the job file (fresh and for this project); none without one.
-    const progPct = prog ? Math.round((prog.done / prog.total) * 100) : undefined
+    const progPct = prog && !(prog.est && stale) ? Math.round((prog.done / prog.total) * 100) : undefined
     // A task with a bar that has just finished keeps it full on its last step for a few seconds, then it goes.
     const justDone =
       progPct !== undefined && l.items.length > 0 && done.length === l.items.length && (await $.clock.now()) - l.at < FULL_MS
     const lastItem = l.items[l.items.length - 1]
     // A live job with no step marked running still belongs to the first step left open.
-    const liveRun = (await read($, run)) !== null
+    const liveRun = runEntry !== null
     const jobItem = currentItem(l, liveRun && progPct !== undefined)
     const isCur = (i: Item) => i === jobItem && i.status !== 'active'
     // A step running on an estimate for 3+ minutes with no update: say so, so a slow or stuck tool call is not mistaken for progress.
     const mins = prog?.est && prog.since !== undefined ? Math.floor(((await $.clock.now()) - prog.since) / 60_000) : 0
-    const slow = mins >= 3 ? `Running ${mins}m. If nothing changes, a tool may be slow or stuck.` : ''
+    const slow = !stale && mins >= 3 ? `Running ${mins}m. If nothing changes, a tool may be slow or stuck.` : ''
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -1060,6 +1066,7 @@ export const register: Register = (on, options) => {
           {shownDone.map((i, n) => row(i, 'd' + n))}
           {shownRest.map((i, n) => row(i, 'r' + n))}
           {hidden > 0 ? note('more', `+${hidden} more`) : null}
+          {stale ? note('stale', staleNote) : null}
         </Box>
       </Box>
     )

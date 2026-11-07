@@ -413,7 +413,7 @@ const PROGRESS_CASES: { name: string; text: string | null; mtime?: number; pct: 
   { name: 'half done', text: '5 10', pct: 50 },
   { name: 'padding and newline', text: '  1 4\n', pct: 25 },
   { name: 'finished', text: '280 280', pct: 100 },
-  { name: 'over the total is capped', text: '12 10', pct: 100 },
+  { name: 'over the total is ignored', text: '12 10', pct: null },
   { name: 'zero total', text: '3 0', pct: null },
   { name: 'garbage', text: 'hello world', pct: null },
   { name: 'one number', text: '5', pct: null },
@@ -462,7 +462,10 @@ test('the bar follows the file as it changes, and goes when the file does', asyn
   expect((await draw()).svgs).toContain('50% done')
   world.progress = null
   await clock.advance(4000)
-  expect((await draw()).svgs).toContain('in progress')
+  // The file is gone: the step falls back to its estimate bar, not the old 50%.
+  const after = (await draw()).svgs
+  expect(after).not.toContain('50% done')
+  expect(after.some(x => x.endsWith('% done'))).toBe(true)
 })
 
 test('a finished task shows a full bar for a few seconds, then it goes', async ($, on) => {
@@ -686,6 +689,20 @@ test("Claude's own list replaces the auto row and keeps its clock", async ($, on
   expect(d.all).toContain('a')
   expect(d.all).not.toContain('Your request is still open')
   expect(d.all.some(t => t.endsWith('/ 1m'))).toBe(true)
+})
+
+test('a carried-over list the model has not touched this turn says so, and shows no estimate bar', async ($, on) => {
+  const w = orchestra($, on)
+  const { set, draw, clock } = await boot($, on, { seen: w.seen })
+  await set({ title: 'Old task', items: [step('a', 'active', { fix: 'f' }), step('b', 'pending', { fix: 'g' })] })
+  await clock.advance(2 * MIN)
+  await $.prompt.submit({ text: 'Try now' })
+  const d = await draw()
+  expect(d.all).toContain('Old task')
+  expect(d.all).toContain('Not updated this turn, last change 2m ago')
+  expect(d.svgs.some(a => /% done/.test(a))).toBe(false)
+  await set({ title: 'Old task', items: [step('a', 'done', { fix: 'f' }), step('b', 'active', { fix: 'g' })] })
+  expect((await draw()).all.some(t => t.startsWith('Not updated this turn'))).toBe(false)
 })
 
 test('a prompt sent while Claude runs a step keeps that list', async ($, on) => {
