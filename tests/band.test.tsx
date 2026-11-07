@@ -411,8 +411,7 @@ const FRESH = 1_000_000
 const PROGRESS_CASES: { name: string; text: string | null; mtime?: number; pct: number | null }[] = [
   { name: 'missing file', text: null, pct: null },
   { name: 'half done', text: '5 10', pct: 50 },
-  { name: 'padding and newline', text: '  1 4
-', pct: 25 },
+  { name: 'padding and newline', text: '  1 4\n', pct: 25 },
   { name: 'finished', text: '280 280', pct: 100 },
   { name: 'over the total is capped', text: '12 10', pct: 100 },
   { name: 'zero total', text: '3 0', pct: null },

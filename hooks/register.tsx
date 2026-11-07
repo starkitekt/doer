@@ -293,10 +293,11 @@ async function refreshProgress($: EngineInterface) {
         curKey = key
         curSince = act.startedAt ?? now
       }
-      p = { done: Math.round(95 * (1 - Math.exp(-(now - curSince) / 90_000))), total: 100, est: true }
+      p = { done: Math.round(95 * (1 - Math.exp(-(now - curSince) / 90_000))), total: 100, est: true, since: curSince }
     } else curKey = ''
   }
-  const key = p ? `${p.done}/${p.total}${p.est ? '~' : ''}` : ''
+  // An estimate also re-keys each minute, so the band's elapsed time keeps moving after the bar stops at its cap.
+  const key = p ? `${p.done}/${p.total}${p.est ? `~${Math.floor(((await $.clock.now()) - (p.since ?? 0)) / 60_000)}` : ''}` : ''
   if (key === progSeen) return
   progSeen = key
   await update($, progress, () => p)
@@ -938,6 +939,9 @@ export const register: Register = (on, options) => {
     const liveRun = (await read($, run)) !== null
     const jobItem = currentItem(l, liveRun && progPct !== undefined)
     const isCur = (i: Item) => i === jobItem && i.status !== 'active'
+    // A step running on an estimate for 3+ minutes with no update: say so, so a slow or stuck tool call is not mistaken for progress.
+    const mins = prog?.est && prog.since !== undefined ? Math.floor(((await $.clock.now()) - prog.since) / 60_000) : 0
+    const slow = mins >= 3 ? `Running ${mins}m. If nothing changes, a tool may be slow or stuck.` : ''
     const shownDone = done.slice(-3)
     const shownRest = rest.slice(0, 7)
     const hidden = rest.length - shownRest.length
@@ -967,7 +971,7 @@ export const register: Register = (on, options) => {
       const isDone = i.status === 'done'
       const isNow = i.status === 'active' || isCur(i)
       const took = stats(i)
-      const why = explain(i)
+      const why = [explain(i), i === jobItem && slow ? slow : ''].filter(Boolean).join(' · ')
       const line = (
         <Box key="l" flexDirection="row" alignItems="center" gap="sm">
           <Text key="t" color={isDone ? P.accent : 'text'} weight="regular" wrap="truncate-end">
