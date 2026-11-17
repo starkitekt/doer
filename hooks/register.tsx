@@ -211,9 +211,21 @@ function refreshGit($: EngineInterface) {
     return
   }
   reading = true
-  const run: Run = (argv, timeoutMs) => $.process.run(argv, { timeoutMs })
+  // session.start fires once per process, so the folder it saw may not be this chat's: ask for it on every read
+  // and run git there. Without an answer the runner's own default (the session's directory) applies.
   const cap = $.clock.sleep(20000).then(() => undefined)
-  void Promise.race([readGit(run).catch(() => null), cap])
+  const read = async () => {
+    let cwd: string | undefined
+    try {
+      cwd = (await $.session.cwd()) || undefined
+    } catch {
+      // No cwd to ask for: git runs where the session does.
+    }
+    if (cwd) sessionCwd = cwd
+    const run: Run = (argv, timeoutMs) => $.process.run(argv, cwd ? { cwd, timeoutMs } : { timeoutMs })
+    return readGit(run)
+  }
+  void Promise.race([read().catch(() => null), cap])
     .then(g => (g === undefined ? undefined : update($, git, () => g)))
     .catch(() => undefined)
     .finally(() => {
@@ -692,6 +704,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const r = await next(e)
     try {
+      refreshGit($)
       if (!r.drop && !e.isMeta && !e.command && r.text.trim() && !r.text.trim().startsWith('/')) await begin($, r.text)
     } catch {
       // Bookkeeping only: the prompt itself is never touched.
