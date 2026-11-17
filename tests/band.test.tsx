@@ -502,6 +502,20 @@ test('an active step without a fix names a running subagent on the step model', 
   expect((await draw()).all.filter(t => t.startsWith('Agent: '))).toEqual(['Agent: band misses steps'])
 })
 
+test('a running helper shows under the current step with a bar, its model and elapsed time', async ($, on) => {
+  const world: World = { spawn: { model: 'claude-haiku-5-5', agentId: 'a1' } }
+  const { set, draw, clock } = await boot($, on, world)
+  await $.agent.spawn({ prompt: 'p', description: 'scan the repo' })
+  world.agents = [agent('a1', 'scan the repo')]
+  await clock.advance(42_000)
+  await set({ title: 'T', items: [step('x', 'active', { fix: 'Look around' })] })
+  const d = await draw()
+  expect(d.svgs).toContain('Helper running')
+  expect(d.all.some(t => t.includes('scan the repo') && t.includes('Haiku') && t.includes('0:4'))).toBe(true)
+  world.agents = []
+  expect((await draw()).svgs).not.toContain('Helper running')
+})
+
 test('finished, nested and unknown subagents are not named', async ($, on) => {
   const world: World = { spawn: { model: 'claude-haiku-5-5', agentId: 'a1' } }
   const { set, draw } = await boot($, on, world)

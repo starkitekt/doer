@@ -175,12 +175,24 @@ const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 2, 6], [5, 4, 4]]
 const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 6}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
 const fade = (on: boolean, t: number) =>
   `<animate attributeName="opacity" calcMode="discrete" values="${on ? '1;0;0' : '0;1;1'}" keyTimes="0;${t};1" dur="4s" repeatCount="indefinite"/>`
-const bar = (p: Palette, pct: number, est = false) => {
+const pixGlass = (p: Palette) => {
   const glass = GLASS.flatMap((row, r) => [...row].flatMap((ch, c) => (ch === '#' ? [px(c, r, 1, p.ring)] : []))).join('')
   const top = SAND_TOP.map(([r, a, b], i) => `<g>${px(a, r, b - a + 1, p.accent)}${fade(true, 0.3 + i * 0.22)}</g>`).join('')
   const bot = SAND_BOT.map(([r, a, b], i) => `<g opacity="0">${px(a, r, b - a + 1, p.accent)}${fade(false, 0.3 + i * 0.22)}</g>`).join('')
   const stream = `<g>${px(4, 4, 1, p.accent)}<animate attributeName="opacity" calcMode="discrete" values="1;0;1;0;1;0" keyTimes="0;0.15;0.3;0.45;0.6;0.78" dur="4s" repeatCount="indefinite"/></g>`
   const turn = `<animateTransform attributeName="transform" type="rotate" calcMode="discrete" values="0 4.5 10.5;90 4.5 10.5;180 4.5 10.5" keyTimes="0;0.88;0.94" dur="4s" repeatCount="indefinite"/>`
+  return `<g>${glass}${top}${bot}${stream}${turn}</g>`
+}
+// A running helper has no percentage, so its bar is a striped pill whose stripes slide, after the same pixel hourglass.
+const AGENT_BAR_W = 15 + 84
+const agentBar = (p: Palette) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${AGENT_BAR_W}" height="${LINE}" viewBox="0 0 ${AGENT_BAR_W} ${LINE}">${pixGlass(p)}` +
+  `<defs><pattern id="st" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="8" fill="${p.accent}"/><rect x="4" width="4" height="8" fill="${p.accent}" opacity="0.45"/>` +
+  `<animateTransform attributeName="patternTransform" type="translate" additive="sum" from="0 0" to="8 0" dur="0.8s" repeatCount="indefinite"/></pattern></defs>` +
+  `<rect x="${TRACK_X}" y="8" width="84" height="6" rx="3" fill="${p.fill}" fill-opacity="0.55"/><rect x="${TRACK_X}" y="8" width="84" height="6" rx="3" fill="url(#st)"/></svg>`
+const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
+const startedAt = new Map<string, number>()
+const bar = (p: Palette, pct: number, est = false) => {
   const lit = Math.min(SEGS, Math.max(pct > 0 ? 1 : 0, Math.round((SEGS * pct) / 100)))
   const blocks = Array.from({ length: SEGS }, (_, i) => {
     const x = TRACK_X + i * 4
@@ -191,7 +203,7 @@ const bar = (p: Palette, pct: number, est = false) => {
     : ''
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_W}" height="${LINE}" viewBox="0 0 ${BAR_W} ${LINE}" shape-rendering="crispEdges">` +
-    `<g>${glass}${top}${bot}${stream}${turn}</g>${blocks}${next}` +
+    `${pixGlass(p)}${blocks}${next}` +
     `<text x="${TRACK_X + SEGS * 4 + 6}" y="${BASE - 1}" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="12" fill="${p.grey}">${est ? '~' : ''}${pct}%</text></svg>`
   )
 }
@@ -861,6 +873,8 @@ export const register: Register = (on, options) => {
         trimMap(asked)
         // The latest 50 are plenty for the running ones, so a long session never piles them up.
         await update($, agentModels, a => Object.fromEntries([...Object.entries(a ?? {}).slice(-49), [id, model]]))
+        startedAt.set(id, await $.clock.now())
+        trimMap(startedAt)
         await attach($, oneLine(e.description, 80), id)
       }
     } catch {
@@ -958,7 +972,7 @@ export const register: Register = (on, options) => {
     // The line under each step: its fix; an active step with none shows what a running subagent on
     // the step's model is on.
     const models = (await read($, agentModels)) ?? {}
-    const live = l.items.some(i => i.status === 'active' && !i.fix)
+    const live = l.items.some(i => i.status === 'active')
       ? (await $.agent.list().catch(() => [])).filter(a => !a.parentId && ['pending', 'running', 'waiting'].includes(a.status))
       : []
     const explain = (i: Item) => {
@@ -1009,6 +1023,20 @@ export const register: Register = (on, options) => {
 
     // Each row: model column (fixed width, so every glyph and task starts at the same x),
     // glyph, task text, then tokens / time against the right edge once the step is done.
+    const nowItem = l.items.find(i => i.status === 'active') ?? jobItem
+    const now0 = await $.clock.now()
+    const agentRow = (a: (typeof live)[number], k: string) => {
+      const t0 = startedAt.get(a.id)
+      const info = [oneLine(a.description ?? 'Helper', 60), shortModel(models[a.id] ?? ''), t0 !== undefined ? mmss(Math.max(0, now0 - t0)) : ''].filter(Boolean).join(' · ')
+      return (
+        <Box key={k} flexDirection="row" alignItems="center" gap="sm">
+          {graphic ? <Svg key="b" source={agentBar(P)} alt="Helper running" width={AGENT_BAR_W} height={LINE} isInteractive /> : null}
+          <Text key="i" size="footnote" color={P.grey} wrap="truncate-end">
+            {graphic ? info : `… ${info}`}
+          </Text>
+        </Box>
+      )
+    }
     const row = (i: Item, k: string) => {
       const isDone = i.status === 'done'
       const isNow = i.status === 'active' || isCur(i)
@@ -1037,7 +1065,7 @@ export const register: Register = (on, options) => {
         </Box>
       )
       // With a fix line the row tops-aligns, so the model and glyph stay on the step's own line.
-      return (
+      const main = (
         <Box key={k} flexDirection="row" alignItems={why ? 'flex-start' : 'center'} gap="sm">
           <Box key={k + 'm'} width={7} flexShrink={0}>
             <Text key="m" size="footnote" weight="medium" color={P.grey} wrap="truncate-end">
@@ -1058,6 +1086,15 @@ export const register: Register = (on, options) => {
               {took}
             </Text>
           ) : null}
+        </Box>
+      )
+      if (i !== nowItem || live.length === 0) return main
+      return (
+        <Box key={k + 'w'} flexDirection="column" gap="xs">
+          {main}
+          <Box key={k + 'a'} flexDirection="column" gap="xs" paddingLeft="lg">
+            {live.slice(0, 3).map((a, n) => agentRow(a, k + 'a' + n))}
+          </Box>
         </Box>
       )
     }

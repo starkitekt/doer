@@ -50,6 +50,8 @@ Every row is a problem, in plain words as you would notice it, and under it a di
 
 The mod adds this to Claude's system prompt whenever it can draw the band, and tells it never to copy steps from the app's task list. An active step with no fix shows what a running subagent on its model is on, as `Agent: …`.
 
+**Running helpers.** Every running subagent shows as a sub-row under the current step: the pixel hourglass, a striped bar that slides while it works, and `description · model · m:ss`. Up to three at once; in the terminal it is a text line.
+
 ## Model orchestration
 
 Subagents are placed on a tier instead of all running on one model. Tiers are relative: **low** (Haiku), **mid** (Sonnet), **high** (Opus or Fable), set by alias so they follow the latest model of each kind. For each spawn, in order:
