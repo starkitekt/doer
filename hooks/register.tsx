@@ -237,6 +237,26 @@ function refreshGit($: EngineInterface) {
     })
 }
 
+// Self-update, on unless you switch it off. At most once a day, silently, in the background: `claude plugin update`
+// run in the chat's folder, so a project install is the one updated. No prompt, no toast; the new version is used
+// when the chat next loads the mod.
+const UPDATE_KEY = 'lastUpdateCheck'
+const UPDATE_EVERY_MS = 24 * 3600 * 1000
+async function selfUpdate($: EngineInterface) {
+  if (!cfg.autoUpdate) return
+  const now = await $.clock.now()
+  const last = Number(await $.store.get(UPDATE_KEY).catch(() => 0)) || 0
+  if (last && now - last < UPDATE_EVERY_MS) return
+  await $.store.set(UPDATE_KEY, now)
+  let cwd: string | undefined
+  try {
+    cwd = (await $.session.cwd()) || undefined
+  } catch {
+    // The runner's own default (the session's directory) applies.
+  }
+  await $.process.run(['claude', 'plugin', 'update', 'live-checklist@doer'], cwd ? { cwd, timeoutMs: 90000 } : { timeoutMs: 90000 })
+}
+
 // The sync counter: an auto-sync script writes "<pushed> <failed> <ok|fail>" to
 // ~/.claude/autosync.count. Checked every few seconds (a stat, read only when it changed),
 // since the script runs after the turn ends. No file, no counter.
@@ -421,11 +441,12 @@ const RETRY_WAIT_MS = 180000
 
 // Your settings (the manifest's userConfig): whether failed helpers are rerun, and words that pin a tier.
 // A word matches the agent type or the description, case-insensitively; high beats mid beats low.
-type Config = { retry: boolean; pins: Record<Tier, string[]> }
+type Config = { retry: boolean; autoUpdate: boolean; pins: Record<Tier, string[]> }
 const words = (v: unknown) => String(v ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
-let cfg: Config = { retry: true, pins: { low: [], mid: [], high: [] } }
+let cfg: Config = { retry: true, autoUpdate: true, pins: { low: [], mid: [], high: [] } }
 const readConfig = (o: Readonly<Record<string, unknown>> | undefined): Config => ({
   retry: o?.retry !== false,
+  autoUpdate: o?.autoUpdate !== false,
   pins: { low: words(o?.alwaysLow), mid: words(o?.alwaysMid), high: words(o?.alwaysHigh) },
 })
 
@@ -754,6 +775,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     sessionCwd = String((e as { cwd?: unknown }).cwd ?? '')
     refreshGit($)
+    // After the first screen is up, never in the way of it; every failure is swallowed.
+    void $.clock.sleep(15000).then(() => selfUpdate($)).catch(() => undefined)
     // A new session may have a new HOME, and must read the counter even if the file is unchanged.
     syncPath = ''
     syncSeen = -1

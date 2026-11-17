@@ -76,6 +76,7 @@ Under the plugin's config rows (per project when set in project-scope `pluginCon
 | Field | Does |
 |---|---|
 | `retry` | rerun failed helpers one tier up (default on) |
+| `autoUpdate` | once a day, silently run `claude plugin update live-checklist@doer` in the chat's folder (default on, no prompt or toast). The new version is used the next time the chat loads the mod |
 | `alwaysLow`, `alwaysMid`, `alwaysHigh` | comma-separated words; a helper whose agent type or description contains one is pinned to that tier |
 
 ## Prompt log

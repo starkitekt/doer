@@ -1,8 +1,11 @@
 {
   "name": "live-checklist",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "description": "A problem-and-fix explainer above the prompt that Claude keeps up to date",
-  "author": { "name": "starkitekt", "url": "https://github.com/starkitekt" },
+  "author": {
+    "name": "starkitekt",
+    "url": "https://github.com/starkitekt"
+  },
   "homepage": "https://github.com/starkitekt/doer",
   "license": "MIT",
   "types": "./types/index.d.ts",
@@ -11,6 +14,13 @@
       "type": "boolean",
       "title": "Run failed helpers again one tier up",
       "description": "When a helper the router placed fails (error, refusal or empty answer), run it once more on the next tier up. Up to 3 a prompt.",
+      "default": true,
+      "required": false
+    },
+    "autoUpdate": {
+      "type": "boolean",
+      "title": "Update automatically",
+      "description": "Once a day, update this mod in the background, silently. The new version is used the next time the chat loads the mod. Turn off to stop.",
       "default": true,
       "required": false
     },

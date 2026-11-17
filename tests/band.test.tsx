@@ -996,3 +996,27 @@ test('/routing says so when nothing has been scored', async ($, on) => {
   expect(r.text).toContain('No helpers scored yet.')
   expect(r.text).toContain('Pinned: none')
 })
+
+// Self-update: on by default and silent; `claude plugin update` runs in the chat's folder.
+const updateRuns = async ($: $T, on: OnT) => {
+  const argvs: string[][] = []
+  const git = (argv: string[]) => {
+    if (argv[0] !== 'claude') return 'throw' as const
+    argvs.push(argv)
+    return { exitCode: 0, stdout: argv[2] === 'list' ? '[{"id":"live-checklist@doer","version":"9.9.9"}]' : 'ok' }
+  }
+  on('store.get', () => ({ value: undefined }) as any)
+  on('store.set', () => ({ value: undefined }) as any)
+  const { clock } = await boot($, on, { git })
+  await clock.advance(30_000)
+  await clock.settle()
+  return argvs.map(a => a.slice(1).join(' '))
+}
+
+test('self-update does nothing when it is switched off', { options: { autoUpdate: false } }, async ($, on) => {
+  expect(await updateRuns($, on)).toEqual([])
+})
+
+test('self-update runs on its own, once, with no prompt', async ($, on) => {
+  expect(await updateRuns($, on)).toEqual(['plugin update live-checklist@doer'])
+})
