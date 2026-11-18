@@ -20,7 +20,7 @@ const run = atom({ plugin: 'live-checklist', key: 'run' } as const, null as Entr
 // unpushed commits, changed files, no remote, else clean. 'No repo' outside a git repo. Read-only: it runs
 // git status and, once the last commit is pushed, gh for its CI runs (skipped if gh is missing).
 type Run = (argv: string[], timeoutMs: number) => Promise<{ exitCode: number; stdout: string }>
-const readGit = async (run: Run): Promise<Git | null> => {
+const readState = async (run: Run): Promise<Git | null> => {
   const st = await run(['git', 'status', '--porcelain=v2', '--branch'], 5000)
   if (st.exitCode !== 0) return { label: 'No repo', tone: 'quiet' }
   let branch = ''
@@ -63,6 +63,18 @@ const readGit = async (run: Run): Promise<Git | null> => {
   }
   return say('clean', 'ok')
 }
+
+// The state plus the origin URL, so the sync counter can tell whether it belongs to this chat's repo.
+const readGit = async (run: Run): Promise<Git | null> => {
+  const g = await readState(run)
+  if (g && g.label !== 'No repo') {
+    const r = await run(['git', 'remote', 'get-url', 'origin'], 5000).catch(() => undefined)
+    if (r?.exitCode === 0 && /\S/.test(r.stdout) && !/^origin\s*$/.test(r.stdout)) g.remote = r.stdout.trim()
+  }
+  return g
+}
+// 'git@host:owner/Repo.git' and 'https://host/owner/repo' are the same repo: compare owner/name.
+const repoKey = (u: string) => /([^/:\s]+\/[^/:\s]+?)(?:\.git)?\/*$/.exec(u.trim())?.[1]?.toLowerCase() ?? u.trim().toLowerCase()
 
 // 'claude-opus-5-5' -> 'Opus'. Anything unrecognised is kept, cut to 8 characters.
 const shortModel = (m: string) => {
@@ -270,7 +282,7 @@ async function selfUpdate($: EngineInterface) {
   await $.process.run(['claude', 'plugin', 'update', 'live-checklist@doer'], cwd ? { cwd, timeoutMs: 90000 } : { timeoutMs: 90000 })
 }
 
-// The sync counter: an auto-sync script writes "<pushed> <failed> <ok|fail>" to
+// The sync counter: an auto-sync script writes "<pushed> <failed> <ok|fail> [origin URL]" to
 // ~/.claude/autosync.count. Checked every few seconds (a stat, read only when it changed),
 // since the script runs after the turn ends. No file, no counter.
 let syncPath = ''
@@ -287,8 +299,9 @@ async function refreshSync($: EngineInterface) {
   if (mtime === syncSeen) return
   let s: Sync | null = null
   if (st) {
-    const [a = '', b = '', c] = String(await $.fs.read(syncPath)).trim().split(/\s+/)
-    if (/^\d+$/.test(a) && /^\d+$/.test(b)) s = { pushed: Number(a), failed: Number(b), lastFailed: c === 'fail' }
+    // An optional fourth field names the repo (its origin URL) the tally belongs to.
+    const [a = '', b = '', c, ...rest] = String(await $.fs.read(syncPath)).trim().split(/\s+/)
+    if (/^\d+$/.test(a) && /^\d+$/.test(b)) s = { pushed: Number(a), failed: Number(b), lastFailed: c === 'fail', ...(rest.length ? { repo: rest.join(' ') } : {}) }
   }
   await update($, sync, () => s)
   syncSeen = mtime
@@ -1129,7 +1142,7 @@ export const register: Register = (on, options) => {
               {g.label}
             </Text>
           ) : null}
-          {s && g && g.label !== 'No repo' ? (
+          {s && g && g.label !== 'No repo' && (!s.repo || (!!g.remote && repoKey(g.remote) === repoKey(s.repo))) ? (
             <Text key="sync" size="footnote" color={s.lastFailed ? 'error' : P.grey} tabular>
               {`${s.pushed} pushed · ${s.failed} failed`}
             </Text>

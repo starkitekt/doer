@@ -399,6 +399,29 @@ test('outside a git repo the sync counter is hidden', async ($, on) => {
   expect(d.texts.find(t => t.text.includes('pushed'))).toBeUndefined()
 })
 
+// The tally belongs to the repo named by its optional fourth field (its origin URL): other repos' chats hide it.
+const repoWorld = (url: string) => (argv: readonly string[]): Proc =>
+  argv[2] === 'get-url' ? { exitCode: 0, stdout: url + '\n' } : IN_REPO(argv)
+
+for (const [url, shown] of [
+  ['git@github-starkitekt:starkitekt/doer.git', true],
+  ['https://github.com/starkitekt/Doer.git', true],
+  ['https://github.com/someone/other-project.git', false],
+] as const) {
+  test(`the sync counter ${shown ? 'shows' : 'is hidden'} in a chat whose origin is ${url}`, async ($, on) => {
+    const text = '4 1 ok git@github-starkitekt:starkitekt/doer.git'
+    const { set, draw } = await boot($, on, { git: repoWorld(url), sync: { text, mtime: 5 } })
+    await set({ title: 'T', items: [step('a', 'pending')] })
+    expect((await draw()).all.some(t => t.includes('4 pushed · 1 failed'))).toBe(shown)
+  })
+}
+
+test('a tally that names a repo is hidden where the chat has no remote', async ($, on) => {
+  const { set, draw } = await boot($, on, { git: IN_REPO, sync: { text: '4 1 ok git@github.com:a/b.git', mtime: 5 } })
+  await set({ title: 'T', items: [step('a', 'pending')] })
+  expect((await draw()).all.some(t => t.includes('pushed'))).toBe(false)
+})
+
 test('the sync counter follows the file as it changes', async ($, on) => {
   const world: World = { git: IN_REPO, sync: { text: '1 0 ok', mtime: 10 } }
   const { set, draw, clock } = await boot($, on, world)
