@@ -366,6 +366,7 @@ for (const c of GIT_CASES) {
 // ---- Header: sync counter -------------------------------------------------------------------
 // Every case uses the same mtime, so a counter cached from an earlier session would show up as a miss.
 
+const IN_REPO = gitWorld(porcelain(head()))
 const SYNC_CASES: { name: string; text: string | null; shows: string | null; alert?: boolean }[] = [
   { name: 'missing file', text: null, shows: null },
   { name: 'last sync failed', text: '3 1 fail', shows: '3 pushed · 1 failed', alert: true },
@@ -378,7 +379,7 @@ const SYNC_CASES: { name: string; text: string | null; shows: string | null; ale
 
 for (const c of SYNC_CASES) {
   test(`sync counter: ${c.name}`, async ($, on) => {
-    const { set, draw } = await boot($, on, { sync: c.text === null ? null : { text: c.text, mtime: 5 } })
+    const { set, draw } = await boot($, on, { git: IN_REPO, sync: c.text === null ? null : { text: c.text, mtime: 5 } })
     await set({ title: 'T', items: [step('a', 'pending')] })
     const d = await draw()
     const counter = d.texts.find(t => t.text.includes('pushed'))
@@ -390,8 +391,16 @@ for (const c of SYNC_CASES) {
   })
 }
 
+test('outside a git repo the sync counter is hidden', async ($, on) => {
+  const { set, draw } = await boot($, on, { git: gitWorld({ exitCode: 128, stdout: '' }), sync: { text: '11 0 ok', mtime: 5 } })
+  await set({ title: 'T', items: [step('a', 'pending')] })
+  const d = await draw()
+  expect(d.all).toContain('No repo')
+  expect(d.texts.find(t => t.text.includes('pushed'))).toBeUndefined()
+})
+
 test('the sync counter follows the file as it changes', async ($, on) => {
-  const world: World = { sync: { text: '1 0 ok', mtime: 10 } }
+  const world: World = { git: IN_REPO, sync: { text: '1 0 ok', mtime: 10 } }
   const { set, draw, clock } = await boot($, on, world)
   await set({ title: 'T', items: [step('a', 'pending')] })
   expect((await draw()).all).toContain('1 pushed · 0 failed')

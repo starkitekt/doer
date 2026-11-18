@@ -186,10 +186,10 @@ const pixGlass = (p: Palette) => {
 // A running helper has no percentage, so its bar is a striped pill whose stripes slide, after the same pixel hourglass.
 const AGENT_BAR_W = 15 + 84
 const agentBar = (p: Palette) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${AGENT_BAR_W}" height="${LINE}" viewBox="0 0 ${AGENT_BAR_W} ${LINE}">${pixGlass(p)}` +
-  `<defs><pattern id="st" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="8" fill="${p.accent}"/><rect x="4" width="4" height="8" fill="${p.accent}" opacity="0.45"/>` +
-  `<animateTransform attributeName="patternTransform" type="translate" additive="sum" from="0 0" to="8 0" dur="0.8s" repeatCount="indefinite"/></pattern></defs>` +
-  `<rect x="${TRACK_X}" y="8" width="84" height="6" rx="3" fill="${p.fill}" fill-opacity="0.55"/><rect x="${TRACK_X}" y="8" width="84" height="6" rx="3" fill="url(#st)"/></svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${AGENT_BAR_W}" height="${LINE}" viewBox="0 0 ${AGENT_BAR_W} ${LINE}" shape-rendering="crispEdges">${pixGlass(p)}` +
+  `<defs><pattern id="st" width="6" height="9" patternUnits="userSpaceOnUse"><rect width="3" height="9" fill="${p.accent}"/><rect x="3" width="3" height="9" fill="${p.accent}" opacity="0.4"/>` +
+  `<animateTransform attributeName="patternTransform" type="translate" calcMode="discrete" values="0 0;1 0;2 0;3 0;4 0;5 0" dur="0.6s" repeatCount="indefinite"/></pattern></defs>` +
+  `<rect x="${TRACK_X}" y="6" width="84" height="9" fill="${p.fill}" fill-opacity="0.55"/><rect x="${TRACK_X}" y="6" width="84" height="9" fill="url(#st)"/></svg>`
 const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
 const startedAt = new Map<string, number>()
 const bar = (p: Palette, pct: number, est = false) => {
@@ -1023,7 +1023,7 @@ export const register: Register = (on, options) => {
 
     // Each row: model column (fixed width, so every glyph and task starts at the same x),
     // glyph, task text, then tokens / time against the right edge once the step is done.
-    const nowItem = l.items.find(i => i.status === 'active') ?? jobItem
+    const nowItem = l.items.find(i => i.status === 'active') ?? jobItem ?? (live.length ? l.items.find(i => i.status !== 'done') : undefined)
     const now0 = await $.clock.now()
     const agentRow = (a: (typeof live)[number], k: string) => {
       const t0 = startedAt.get(a.id)
@@ -1128,7 +1128,7 @@ export const register: Register = (on, options) => {
               {g.label}
             </Text>
           ) : null}
-          {s ? (
+          {s && g && g.label !== 'No repo' ? (
             <Text key="sync" size="footnote" color={s.lastFailed ? 'error' : P.grey} tabular>
               {`${s.pushed} pushed · ${s.failed} failed`}
             </Text>
