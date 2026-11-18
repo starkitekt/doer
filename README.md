@@ -90,7 +90,7 @@ Every prompt is logged across sessions in the mod's store under `prompts` (lates
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install live-checklist --marketplace starkitekt/doer
+/plugin install live-checklist --marketplace https://github.com/starkitekt/doer.git
 ```
 
 Answer `y` to add the marketplace, then press Enter to pick the user scope.
@@ -98,10 +98,10 @@ Answer `y` to add the marketplace, then press Enter to pick the user scope.
 From a shell:
 
 ```bash
-claude plugin install live-checklist --marketplace starkitekt/doer
+claude plugin install live-checklist --marketplace https://github.com/starkitekt/doer.git
 ```
 
-In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, then **Add marketplace** with `starkitekt/doer`, then **Add plugin**.
+In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, then **Add marketplace** with `https://github.com/starkitekt/doer.git`, then **Add plugin**.
 
 ## Use
 
