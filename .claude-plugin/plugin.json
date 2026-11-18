@@ -1,6 +1,6 @@
 {
   "name": "live-checklist",
-  "version": "0.9.16",
+  "version": "0.9.17",
   "description": "A problem-and-fix explainer above the prompt that Claude keeps up to date",
   "author": {
     "name": "starkitekt",
