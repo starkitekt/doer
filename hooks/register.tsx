@@ -168,10 +168,11 @@ const FULL_MS = 5000 // how long a finished task keeps its full bar
 const TRACK_X = 15
 const SEGS = 21
 const PX = 1 // 9 x 9 px, the same size as the status circle (10 px)
-const GLASS = ['#########', '.#.....#.', '.#.....#.', '..##.##..', '....#....', '..##.##..', '.#.....#.', '.#.....#.', '#########']
-// Sand rows [row, first col, last col] in the bulbs; the top drains from its surface down, the bottom fills from its floor up.
-const SAND_TOP: [number, number, number][] = [[1, 2, 6], [2, 2, 6], [3, 4, 4]]
-const SAND_BOT: [number, number, number][] = [[7, 2, 6], [6, 2, 6], [5, 4, 4]]
+const GLASS = ['..#####..', '...###...', '...#.#...', '...###...', '....#....', '...###...', '...#.#...', '...###...', '..#####..']
+// Two 3 x 3 squares with a cap each, touching at one pixel. The sand is the pixel inside each square: the top one
+// goes out as the bottom one fills, with the neck pixel blinking between them as the stream.
+const SAND_TOP: [number, number, number][] = [[2, 4, 4]]
+const SAND_BOT: [number, number, number][] = [[6, 4, 4]]
 const px = (c: number, r: number, w: number, fill: string) => `<rect x="${c * PX}" y="${r * PX + 6}" width="${w * PX}" height="${PX}" fill="${fill}"/>`
 const fade = (on: boolean, t: number) =>
   `<animate attributeName="opacity" calcMode="discrete" values="${on ? '1;0;0' : '0;1;1'}" keyTimes="0;${t};1" dur="4s" repeatCount="indefinite"/>`
