@@ -168,8 +168,8 @@ const FULL_MS = 5000 // how long a finished task keeps its full bar
 const TRACK_X = 15
 const SEGS = 21
 const PX = 1 // 9 x 9 px, the same size as the status circle (10 px)
-const GLASS = ['.#######.', '..#...#..', '..#...#..', '...#.#...', '....#....', '...#.#...', '..#...#..', '..#...#..', '.#######.']
-// Classic pixel hourglass: a flat cap at each end, walls that taper to a one-pixel neck. The top sand drains from its
+const GLASS = ['..#####..', '..#...#..', '..#...#..', '...#.#...', '....#....', '...#.#...', '..#...#..', '..#...#..', '..#####..']
+// Classic pixel hourglass: a flat cap at each end, flush with the walls, walls that taper to a one-pixel neck. The top sand drains from its
 // surface down while the bottom one builds up as a mound, with the neck pixel blinking as the stream.
 const SAND_TOP: [number, number, number][] = [[1, 3, 5], [2, 3, 5], [3, 4, 4]]
 const SAND_BOT: [number, number, number][] = [[7, 3, 5], [6, 3, 5], [5, 4, 4]]
